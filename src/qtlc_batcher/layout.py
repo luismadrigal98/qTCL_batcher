@@ -150,26 +150,52 @@ def _shift_profile(p: np.ndarray, dy: float) -> np.ndarray:
     return np.interp(y + dy, y, p, left=0.0, right=0.0)
 
 
-def _refine_residuals(profs_dt, tmpl, gap, max_res):
-    """Small per-lane vertical corrections (|r| <= max_res, i.e. well under half a band gap, so a band can never
-    be mistaken for its neighbour) by normalised cross-correlation with the standards' de-tilted profile."""
+def _refine_residuals(profs_dt, tmpl, gap, max_res, center=None):
+    """Per-lane vertical offsets by normalised cross-correlation with the standards' de-tilted profile, searched
+    within `center` +/- `max_res` px (keep max_res below half a band gap so a band can never be taken for its
+    neighbour). Returns (offsets, strong): `strong` marks lanes with enough pigment to measure."""
     ref = profs_dt[:STANDARD_LANES].sum(axis=0)
     lo, hi = int(max(0, tmpl[0] - gap)), int(min(ref.size, tmpl[-1] + gap))
     r_ref = ref[lo:hi] - ref[lo:hi].mean()
     strength = np.array([p[lo:hi].max() for p in profs_dt])
-    res = np.zeros(len(profs_dt))
+    strong = strength >= 0.08 * strength[:STANDARD_LANES].max()
+    center = np.zeros(len(profs_dt)) if center is None else np.asarray(center, dtype=float)
+    res = center.copy()
     for k, p in enumerate(profs_dt):
-        if strength[k] < 0.08 * strength[:STANDARD_LANES].max():
-            continue                                      # empty lane: keep the tilt prediction
-        best = (-np.inf, 0)
-        for r in range(-int(max_res), int(max_res) + 1):
+        if not strong[k]:
+            continue                                      # empty lane: keep the prediction
+        best = (-np.inf, center[k])
+        for r in range(int(np.floor(center[k] - max_res)), int(np.ceil(center[k] + max_res)) + 1):
             seg = _shift_profile(p, r)[lo:hi]
             seg = seg - seg.mean()
             c = float((seg * r_ref).sum() / (np.linalg.norm(seg) * np.linalg.norm(r_ref) + 1e-12))
             if c > best[0]:
                 best = (c, r)
         res[k] = best[1]
-    return res
+    return res, strong
+
+
+def _robust_trend(x, y, use, gap):
+    """Smooth trend of lane offsets across the plate: robust straight line (residual tilt between the bands and
+    the pencil line), upgraded to a parabola only when that clearly fits better (TLC "smile"). Lanes further than
+    0.12 band gaps from the fit are dropped iteratively (they keep their own offset later)."""
+    idx = np.nonzero(use)[0]
+    if idx.size < 3:
+        return np.zeros_like(x, dtype=float)
+    keep = idx.copy()
+    for _ in range(len(idx)):
+        coef = np.polyfit(x[keep], y[keep], 1)
+        err = np.abs(np.polyval(coef, x[keep]) - y[keep])
+        if err.max() <= 0.12 * gap or keep.size <= 4:
+            break
+        keep = np.delete(keep, int(err.argmax()))
+    rms1 = np.sqrt(np.mean((np.polyval(coef, x[keep]) - y[keep]) ** 2))
+    if keep.size >= 6:
+        coef2 = np.polyfit(x[keep], y[keep], 2)
+        rms2 = np.sqrt(np.mean((np.polyval(coef2, x[keep]) - y[keep]) ** 2))
+        if rms2 < 0.7 * rms1 and rms1 > 0.04 * gap:
+            coef = coef2
+    return np.polyval(coef, x)
 
 
 def _line_y(line_dt: float, slope: float, x, x_ref: float):
@@ -198,20 +224,26 @@ def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.17, m: np.ndarray 
     if not trust_lines:                                 # no clear straight lines: do not trust the tilt
         slope = 0.0
         notes.append("no straight pencil line found; plate tilt not estimated")
-    tilt_deg = float(np.rad2deg(np.arctan(slope)))
-    if abs(tilt_deg) >= 1:
-        notes.append(f"plate tilted {tilt_deg:+.1f} degrees (corrected)")
 
     # de-tilt every lane profile into lane-0 coordinates, rebuild the template from the standards
     profs_dt = np.array([_shift_profile(p, slope * (c - x_ref)) for p, c in zip(profs, centers)])
     tmpl = _band_template(profs_dt)
     gap = float(np.diff(tmpl).min())
-    max_res = 0.25 * gap
-    res = _refine_residuals(profs_dt, tmpl, gap, max_res)
-    if np.any(np.abs(res) >= max_res - 1):
-        bad = [str(k + 1) for k in np.nonzero(np.abs(res) >= max_res - 1)[0]]
-        notes.append(f"lane(s) {', '.join(bad)}: band position at the search limit; check the boxes")
+    # 1) every lane with pigment, measured within +/-0.45 gap (still cannot slip by a whole band)
+    res1, strong = _refine_residuals(profs_dt, tmpl, gap, 0.45 * gap)
+    # 2) the bands' own residual tilt / smile across the plate, from the measurable lanes
+    trend = _robust_trend(centers - x_ref, res1, strong, gap)
+    # 3) final per-lane correction, tight around that trend; empty lanes simply follow the trend
+    tight = 0.2 * gap
+    res, _ = _refine_residuals(profs_dt, tmpl, gap, tight, center=trend)
+    at_limit = strong & (np.abs(res - trend) >= tight - 1)
+    at_limit[:STANDARD_LANES] = False   # standards run slightly apart with load (S500 lowest); they define the template
+    if at_limit.any():
+        bad = [str(k + 1) for k in np.nonzero(at_limit)[0]]
+        notes.append(f"lane(s) {', '.join(bad)}: bands far from the other lanes' positions; check the boxes")
     shifts = slope * (centers - x_ref) + res
+    eff = slope + (np.polyfit(centers - x_ref, trend, 1)[0] if len(centers) > 1 else 0.0)
+    tilt_deg = float(np.rad2deg(np.arctan(eff)))     # what the bands actually follow
 
     # band limits midway between neighbouring bands, so a rectangle never contains two bands
     edges = np.concatenate([[tmpl[0] - (tmpl[1] - tmpl[0]) / 2], (tmpl[:-1] + tmpl[1:]) / 2,
@@ -243,6 +275,8 @@ def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.17, m: np.ndarray 
             rects[k, b] = (xa, xb, y0, y1)
     if clipped:
         notes.append(f"band-3 boxes shortened above the origin line in lane(s) {', '.join(map(str, clipped))}")
+    if abs(tilt_deg) >= 1:
+        notes.insert(0, f"plate tilted {tilt_deg:+.1f} degrees (corrected)")
     return Layout(rects=rects, lane_centers=centers, lane_spacing=spacing, notes=notes, tilt_deg=tilt_deg)
 
 

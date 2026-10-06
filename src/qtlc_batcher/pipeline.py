@@ -13,11 +13,11 @@ from .layout import Layout, detect_layout, detect_rotation
 
 @dataclass
 class Params:
-    min_peak_prom: float = 5.0   # qTLC's own default is 1; 5 best matches the collaborators' tuned values (see README)
+    min_peak_prom: float = 3.0   # qTLC's own default is 1; 5 loses the faintest standard (README section 6)
     divisor: float = 2.0         # qTLC default
     rotate: int | None = None    # degrees CCW, multiple of 90; None = detect automatically
     bg_kernel: int | None = None  # background kernel size in px; None -> round(diag/2) of the largest-band rectangle
-    uint8_wrap: bool = True      # reproduce the web app's uint8 overflow quirk (see integrate.py)
+    uint8_wrap: bool = False     # True = reproduce the web app's uint8 overflow bug (parity with old numbers)
 
 
 @dataclass
@@ -34,6 +34,8 @@ class PlateResult:
     turns: int = 0                         # 90-degree CCW turns applied to the photo
     top_touch: np.ndarray = field(repr=False, default=None)   # [band, lane] share of integrated columns whose
                                                               # integration reaches the box's top edge (streaks)
+    blanks: np.ndarray = field(repr=False, default=None)      # [band, gap] integrals of empty boxes between lanes
+    lod: np.ndarray = field(repr=False, default=None)         # [band] limit of detection = blank mean + 3 SD
 
 
 def rect_slice(rect, origin, shape):
@@ -87,5 +89,23 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
             cols = masks[(k, b)].any(axis=0)
             if cols.any():   # a real band is a blob inside the box; a streak from the front enters at the top
                 top_touch[b, k] = float((masks[(k, b)][0] & cols).sum() / cols.sum())
+    blanks = blank_integrals(th, layout.rects, (x0, y0), params)
+    lod = blanks.mean(axis=1) + 3 * blanks.std(axis=1) if blanks.size else np.zeros(n_bands)
     return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns,
-                       top_touch)
+                       top_touch, blanks, lod)
+
+
+def blank_integrals(th, rects, origin, params) -> np.ndarray:
+    """Integrals of empty boxes (same size and rows as the neighbouring band boxes) placed midway between
+    adjacent lanes, i.e. the plate's response to no pigment, processed exactly like the real boxes."""
+    n_lanes, n_bands = rects.shape[:2]
+    out = np.zeros((n_bands, max(n_lanes - 1, 0)))
+    for j in range(n_lanes - 1):
+        for b in range(n_bands):
+            a, c = rects[j, b], rects[j + 1, b]
+            cx, hw = (a[0] + a[1] + c[0] + c[1]) / 4, (a[1] - a[0]) / 2
+            r0, r1, c0, c1 = rect_slice((cx - hw, cx + hw, (a[2] + c[2]) / 2, (a[3] + c[3]) / 2), origin, th.shape)
+            if r1 > r0 and c1 > c0:
+                out[b, j] = integrate_band(th[r0:r1, c0:c1], params.min_peak_prom, params.divisor,
+                                           params.uint8_wrap)[0]
+    return out

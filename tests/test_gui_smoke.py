@@ -19,5 +19,5 @@ def test_gui_window_builds_and_lists_photos(tmp_path):
     w.load_folder(tmp_path)
     assert [e.path.name for e in w.entries] == ["a.jpg"]
     assert w.list.rowCount() == 1 and w.entries[0].status == "pending"
-    assert w.params().min_peak_prom == 5.0 and w.params().rotate is None
+    assert w.params().min_peak_prom == 3.0 and w.params().rotate is None and not w.params().uint8_wrap
     w.close()

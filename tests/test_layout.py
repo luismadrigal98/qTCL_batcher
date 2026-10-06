@@ -74,3 +74,55 @@ def test_calibration_models_recover_their_own_curves():
     # samples outside the standards' range are marked
     out = calibrate(v_pw, model="loglog").outside[0]
     assert list(out) == [0, 0, 0, 0, -1, 0]
+
+
+def test_end_to_end_synthetic_plate_flags_and_workbook(tmp_path):
+    import pandas as pd
+    from PIL import Image
+
+    from qtlc_batcher.pipeline import Params, analyse_plate
+    from qtlc_batcher.results import export_workbook, plate_tables, quality_flags
+
+    rgb, truth, _ = synthetic_plate(-0.06)
+    path = tmp_path / "plate.png"
+    Image.fromarray(rgb).save(path)
+    res = analyse_plate(path, Params(rotate=0))
+    df, cal = plate_tables(res, "AP0", None, model="loglog")
+    flags = quality_flags(res, cal, res.turns)
+    assert all(f.startswith(("CHECK: ", "note: ")) for f in flags)
+    assert any("plate tilted" in f for f in flags)                 # tilt reported as a note
+    assert not any("streak" in f for f in flags)                    # clean synthetic lanes: no streak flag
+    assert (res.values[0, 3:] < 0.02 * res.values[0, 0]).all()      # samples have no band 1 -> ~0 pelargonidin
+    out = tmp_path / "sub" / "r.xlsx"
+    export_workbook(out, [dict(image="plate.png", plate="AP0", res=res, df=df, cal=cal, flags=flags)], res.params)
+    sheets = pd.read_excel(out, sheet_name=None)
+    assert {"severity", "flag"} <= set(sheets["Flags"].columns)
+    assert set(sheets["Tidy"]["calibration"]) == {"loglog"}
+
+
+def test_detection_limit_drops_faint_standards_and_zeroes_undetected_samples():
+    conc = np.array([500.0, 125.0, 31.25])
+    pw = lambda c: 900.0 * c ** 0.73
+    stds = pw(conc); stds[2] = 50.0                      # lowest standard lost (below detection)
+    samples = np.array([pw(300.0), pw(150.0), 40.0, 0.0, pw(200.0), 10.0])
+    v = np.vstack([np.concatenate([stds, samples])] * 3)
+    cal = calibrate(v, model="loglog", lod=np.array([200.0] * 3))
+    assert cal.n_standards_used[0] == 2                  # S31.25 left out of the fit
+    np.testing.assert_allclose(cal.conc[0, [0, 1, 4]], [300.0, 150.0, 200.0], rtol=1e-6)
+    assert list(cal.conc[0, [2, 3, 5]]) == [0.0, 0.0, 0.0]   # below the limit: not detected
+
+
+def test_synthetic_plate_empty_band1_slots_are_not_detected(tmp_path):
+    from PIL import Image
+
+    from qtlc_batcher.pipeline import Params, analyse_plate
+    from qtlc_batcher.results import plate_tables
+
+    rgb, _, _ = synthetic_plate(0.0)
+    Image.fromarray(rgb).save(tmp_path / "p.png")
+    res = analyse_plate(tmp_path / "p.png", Params(rotate=0, min_peak_prom=3, uint8_wrap=False))
+    df, _ = plate_tables(res, None, None, model="loglog")
+    samples = df[df.sample_no.notna()]
+    assert not samples[samples.band == 1].detected.any()       # samples have no band 1
+    assert samples[samples.band.isin([2, 3])].detected.all()    # bands 2 and 3 are there
+    assert (res.lod > 0).all() and res.blanks.shape == (3, 8)

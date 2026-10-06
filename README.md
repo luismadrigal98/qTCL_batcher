@@ -101,19 +101,20 @@ qtlc-batch benchmark ../Phenotyping/GenotpedPigmentExtractionSamplesList.xlsx ..
   under-predicts the middle standard by 18 % (power law: 4 %). The straight line therefore biases mid-range samples and
   clips some visible ones to 0. Choose with `--calibration` / the GUI *Calibration* box; the `calibration` column records it.
 
-**Flags** (Flags sheet / GUI panel):
+**Flags** (Flags sheet, sorted CHECK first; GUI panel). A plate's status is `check` only if it has a CHECK flag.
 
-| Flag | Meaning / what to do |
-|---|---|
-| *layout: plate tilted N degrees (corrected)* | informational; boxes follow the tilt |
-| *layout: lane(s) … band position at the search limit* | that lane's bands sit higher/lower than the tilt predicts (streaks, uneven run) — check those boxes |
-| *layout: band-3 boxes shortened above the origin line* | bands run close to the pencil origin line; boxes stop above it |
-| *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear — tighten the box |
-| *standards are not decreasing S500 > S125 > S31.25* | boxes misplaced on the standards, or a bad plate |
-| *standard curve slope <= 0* / *R² < 0.95* | the band's calibration is unusable / weak |
-| *a standard has no signal; power law fitted through 2 standards* | `loglog` only |
-| *extrapolated above the S500 standard* | sample stronger than the top standard: outside the calibrated range |
-| *uint8 overflow* (§5), *photo was rotated*, *rectangles were edited manually* | as named |
+| Severity | Flag | Meaning / what to do |
+|---|---|---|
+| CHECK | *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear — tighten the box |
+| CHECK | *layout: lane(s) … bands far from the other lanes' positions* | that lane runs higher/lower than the rest of the plate (overloaded sample, streak, uneven front) — check those boxes |
+| CHECK | *standards are not decreasing S500 > S125 > S31.25* | boxes misplaced on the standards, or a bad plate |
+| CHECK | *standard curve slope <= 0* / *R² < 0.90* | the band's calibration is unusable / weak |
+| CHECK | *uint8 overflow* (§5) | web-app parity value is too low; rerun with `--no-uint8-wrap` for the true value |
+| note | *standard curve R² 0.90–0.95* | weak but usable curve (often the curvature in §4) |
+| note | *extrapolated above the S500 standard* | sample stronger than the top standard: outside the calibrated range |
+| note | *layout: plate tilted N degrees (corrected)* / *band-3 boxes shortened above the origin line* | informational |
+| note | *a standard has no signal; power law fitted through 2 standards* | `loglog` only |
+| note | *photo was rotated* / *rectangles were edited manually* | as named |
 
 ## 5. Known bug in the qTLC web app (reproduced here; documented on purpose)
 
@@ -157,11 +158,12 @@ front. The background kernel is the web-app rule applied to the largest-band rec
 
 The Excel is *not* ground truth: each person drew their own rectangles and chose their own thresholds. Absolute integrals
 differ by a roughly constant factor, so the comparison uses concentrations **calibrated on each plate's own three
-standards** (scale-free). Current `qtlc-batch benchmark` result (28 plates, 504 calibrated sample values, default
-parameters, fully automatic, no manual correction): **Pearson 0.88, Spearman 0.86, median ratio auto/benchmark 1.04**;
-24 of 28 plates have r ≥ 0.90. The weaker plates (AP31 0.81, AP35 0.43, AP42 0.39, AP38 0.26) are mostly band 3, where the
-S31.25 standard is nearly empty and the 3-point calibration is ill-conditioned; band 2 agrees closely there
-(AP38: 143.3 vs 146.9, 308.5 vs 310.3). Band 1 is mostly empty in samples, so its agreement is dominated by noise.
+standards** (scale-free). Current `qtlc-batch benchmark` result (v0.2: tilt model + box clipping; 28 plates, 504
+calibrated sample values, default parameters, linear calibration, fully automatic, no manual correction): **Pearson 0.95,
+Spearman 0.89, median ratio auto/benchmark 1.05** (v0.1: 0.88 / 0.86 / 1.04). 23 of 28 plates have r ≥ 0.90; the lowest
+are AP35 (0.56), AP31 (0.81), AP62 (0.88), AP42 (0.89), AP38 (0.89). Agreement between two calibrated *noisy* datasets cannot
+choose the calibration model (log-log scores lower on it because it amplifies faint-band noise on both sides); the
+middle-standard test in §4 is the relevant evidence for that choice.
 
 ## 9. Troubleshooting
 

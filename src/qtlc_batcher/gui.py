@@ -18,7 +18,7 @@ from . import imaging
 from .layout import Layout
 from .pipeline import Params, PlateResult, analyse_plate
 from .platemap import load_image_plate_map, load_platemap
-from .results import STANDARD_CONC, export_workbook, plate_tables, quality_flags
+from .results import STANDARD_CONC, export_workbook, needs_check, plate_tables, quality_flags
 
 BAND_COLORS = [QtGui.QColor(255, 140, 0), QtGui.QColor(40, 190, 70), QtGui.QColor(30, 150, 255)]
 LANE_HEADERS = ["S500", "S125", "S31.25"] + [f"{i}" for i in range(1, 7)]
@@ -45,7 +45,7 @@ class Entry:
             return "error"
         if self.res is None:
             return "pending"
-        return ("reviewed" if self.reviewed else "flags" if self.flags else "ok") + (" *" if self.edited else "")
+        return ("reviewed" if self.reviewed else "check" if needs_check(self.flags) else "ok") + (" *" if self.edited else "")
 
 
 class AnalysisWorker(QtCore.QThread):
@@ -227,7 +227,9 @@ class MainWindow(QtWidgets.QMainWindow):
         act("Re-process all", self.reprocess_all, "Recompute every plate with the CURRENT parameters (keeps rectangles)")
         act("Recompute", self.recompute_current, "Re-integrate this plate with the current rectangles/parameters")
         act("Re-detect layout", self.redetect_current, "Discard manual rectangle edits for this plate")
-        act("Mark reviewed", self.mark_reviewed)
+        a = act("Mark reviewed", self.mark_reviewed, "Toggle reviewed for this plate (R)"); a.setShortcut("R")
+        a = act("Next to check ▶", self.next_to_check, "Jump to the next plate with a CHECK flag not yet reviewed (N)")
+        a.setShortcut("N")
         tb.addSeparator()
         act("Export Excel…", self.export_excel)
         act("Save session…", self.save_session); act("Load session…", self.load_session)
@@ -239,7 +241,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.list.horizontalHeader().setStretchLastSection(True)
         self.list.currentCellChanged.connect(lambda r, *_: self.select_row(r))
         self.list.itemChanged.connect(self._plate_edited)
-        dock = QtWidgets.QDockWidget("Plates", self); dock.setWidget(self.list); dock.setFeatures(dock.NoDockWidgetFeatures)
+        self.cb_only_check = QtWidgets.QCheckBox("Only plates to check")
+        self.cb_only_check.toggled.connect(self._apply_filter)
+        left = QtWidgets.QWidget(); ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self.cb_only_check); ll.addWidget(self.list)
+        dock = QtWidgets.QDockWidget("Plates", self); dock.setWidget(left); dock.setFeatures(dock.NoDockWidgetFeatures)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock); dock.setMinimumWidth(330)
 
         self.view = ImageView(); self.view.rectChanged.connect(self.rect_edited)
@@ -250,6 +256,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_proc = QtWidgets.QCheckBox("Show processed (inverted + background-corrected)")
         for cb in (self.cb_rects, self.cb_mask, self.cb_proc):
             cb.toggled.connect(self.refresh_view); opts.addWidget(cb)
+        self.cb_all = QtWidgets.QCheckBox("Edit all lanes of that band together")
+        self.cb_all.setToolTip("A move/resize of one box is applied to the same band in every lane "
+                               "(e.g. lower the band-1 top edge on a streaky plate in one drag)")
+        opts.addWidget(self.cb_all)
         btn_fit = QtWidgets.QPushButton("Fit"); btn_fit.clicked.connect(lambda: self.view.fit_layout(self.current_res()))
         opts.addStretch(1); opts.addWidget(btn_fit)
         lay.addLayout(opts); lay.addWidget(self.view, 1)
@@ -257,10 +267,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         side = QtWidgets.QWidget(); sl = QtWidgets.QVBoxLayout(side)
         form = QtWidgets.QFormLayout()
-        self.sp_prom = QtWidgets.QDoubleSpinBox(); self.sp_prom.setRange(0, 100); self.sp_prom.setSingleStep(0.5); self.sp_prom.setValue(5.0)
+        self.sp_prom = QtWidgets.QDoubleSpinBox(); self.sp_prom.setRange(0, 100); self.sp_prom.setSingleStep(0.5); self.sp_prom.setValue(3.0)
         self.sp_div = QtWidgets.QDoubleSpinBox(); self.sp_div.setRange(1, 10); self.sp_div.setSingleStep(0.5); self.sp_div.setValue(2.0)
         self.sp_ker = QtWidgets.QSpinBox(); self.sp_ker.setRange(0, 400); self.sp_ker.setSpecialValueText("auto")
-        self.cb_wrap = QtWidgets.QCheckBox("Reproduce web-app uint8 overflow (parity)"); self.cb_wrap.setChecked(True)
+        self.cb_wrap = QtWidgets.QCheckBox("Reproduce web-app uint8 overflow bug (parity only)"); self.cb_wrap.setChecked(False)
         self.co_rot = QtWidgets.QComboBox(); self.co_rot.addItems(["Auto", "0°", "90°", "180°", "270°"])
         self.co_rot.setToolTip("Rotation of the selected plate (detected automatically; override here)")
         form.addRow("MinPeakProm", self.sp_prom); form.addRow("Divisor", self.sp_div)
@@ -269,7 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_prom.valueChanged.connect(self._params_changed); self.sp_div.valueChanged.connect(self._params_changed)
         self.sp_ker.valueChanged.connect(self._params_changed); self.cb_wrap.toggled.connect(self._params_changed)
         self.co_rot.currentIndexChanged.connect(self._rotation_changed)
-        self.co_cal = QtWidgets.QComboBox(); self.co_cal.addItems(["linear", "loglog"])
+        self.co_cal = QtWidgets.QComboBox(); self.co_cal.addItems(["loglog", "linear"])
         self.co_cal.setToolTip("Standard-curve model: linear (qTLC paper) or log-log power law")
         form.addRow("Calibration", self.co_cal)
         self.co_cal.currentIndexChanged.connect(self._calibration_changed)
@@ -309,10 +319,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_row(self, row: int):
         e = self.entries[row]
+        if hasattr(self, "cb_only_check") and self.cb_only_check.isChecked():
+            self.list.setRowHidden(row, not (e.status.startswith("check") or e.status == "error"))
         self.list.blockSignals(True)
         self.list.item(row, 0).setText(e.path.name); self.list.item(row, 1).setText(e.plate)
         it = self.list.item(row, 2); it.setText(e.status)
-        it.setForeground({"error": QtGui.QColor("#d33"), "flags": QtGui.QColor("#c80"), "pending": QtGui.QColor("#888")}
+        it.setForeground({"error": QtGui.QColor("#d33"), "check": QtGui.QColor("#c80"), "pending": QtGui.QColor("#888")}
                          .get(e.status.split()[0], QtGui.QColor("#2a2")))
         self.list.blockSignals(False)
 
@@ -417,7 +429,7 @@ class MainWindow(QtWidgets.QMainWindow):
         e.df, e.cal = plate_tables(e.res, e.plate or None, self.platemap, model=self.co_cal.currentText())
         e.flags = quality_flags(e.res, e.cal, e.res.turns)
         if e.edited:
-            e.flags.append("rectangles were edited manually")
+            e.flags.append("note: rectangles were edited manually")
         self._refresh_row(self._row_of(e))
 
     def _busy(self) -> bool:
@@ -451,7 +463,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def mark_reviewed(self):
         e = self.cur()
         if e and e.res is not None:
-            e.reviewed = not e.reviewed; self._refresh_row(self._row_of(e))
+            e.reviewed = not e.reviewed; self._refresh_row(self._row_of(e)); self._apply_filter()
+
+    def next_to_check(self):
+        n = len(self.entries)
+        start = self.list.currentRow()
+        for i in range(1, n + 1):
+            r = (start + i) % n
+            if self.entries[r].status.startswith("check"):
+                self.list.selectRow(r); return
+        self.statusBar().showMessage("no plate left to check")
+
+    def _apply_filter(self, *_):
+        only = self.cb_only_check.isChecked()
+        for r, e in enumerate(self.entries):
+            self.list.setRowHidden(r, only and not (e.status.startswith("check") or e.status == "error"))
 
     def _params_changed(self, *_):
         if self.cur() and self.cur().res is not None:
@@ -474,7 +500,13 @@ class MainWindow(QtWidgets.QMainWindow):
         y0, y1 = sorted((min(max(y0, 0), h), min(max(y1, 0), h)))
         if x1 - x0 < 3 or y1 - y0 < 3:
             self.show_current(keep_view=True); return       # dragged off the photo: ignore
-        rects = e.res.layout.rects.copy(); rects[lane, band] = (x0, x1, y0, y1)
+        rects = e.res.layout.rects.copy()
+        if self.cb_all.isChecked():                 # same edge change for this band in every lane (keeps the tilt)
+            delta = np.array([x0, x1, y0, y1]) - rects[lane, band]
+            rects[:, band] = rects[:, band] + delta
+            rects[:, band, :2] = np.clip(rects[:, band, :2], 0, w); rects[:, band, 2:] = np.clip(rects[:, band, 2:], 0, h)
+        else:
+            rects[lane, band] = (x0, x1, y0, y1)
         e.layout = replace(e.res.layout, rects=rects); e.edited = True; e.reviewed = False
         self.recompute_current()
 
@@ -521,6 +553,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if e.res.overflow_cols[b, k] and e.res.params.uint8_wrap:
                     it.setBackground(QtGui.QColor(255, 210, 120))
+                if e.res.lod is not None and e.res.values[b, k] < e.res.lod[b]:
+                    it.setForeground(QtGui.QColor(150, 150, 150))
+                    it.setToolTip(f"below this plate's detection limit ({e.res.lod[b]:,.0f}): not detected")
                 self.tbl.setItem(b, k, it)
             for k in range(6):
                 v = e.cal.conc[b, k]
@@ -528,6 +563,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter); self.tbl_cal.setItem(b, k, it)
         self.lbl_r2.setText(f"{e.cal.model} standard-curve R²:  " + "   ".join(f"band {b + 1}: {e.cal.r2[b]:.3f}" for b in range(3)
                                                                if np.isfinite(e.cal.r2[b])) +
+                            "\ndetection limit (blank + 3 SD): " + " / ".join(f"{x:,.0f}" for x in e.res.lod) +
                             f"\nkernel {e.res.bg_kernel}px · rotation {90 * e.res.turns}°")
         self.txt_flags.setPlainText("\n".join(e.flags) or "no flags")
 
@@ -571,7 +607,7 @@ class MainWindow(QtWidgets.QMainWindow):
         data = json.loads(Path(path).read_text())
         p = data["params"]
         self.sp_prom.setValue(p["min_peak_prom"]); self.sp_div.setValue(p["divisor"])
-        self.sp_ker.setValue(p.get("bg_kernel") or 0); self.cb_wrap.setChecked(p.get("uint8_wrap", True))
+        self.sp_ker.setValue(p.get("bg_kernel") or 0); self.cb_wrap.setChecked(p.get("uint8_wrap", False))
         self.load_folder(Path(data["entries"][0]["path"]).parent) if data["entries"] else None
         by_path = {str(e.path): e for e in self.entries}
         jobs = []

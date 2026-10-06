@@ -51,8 +51,8 @@ def compare(mine: np.ndarray, ref: np.ndarray) -> dict:
     )
 
 
-def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray], model: str = "linear") -> dict:
-    """Agreement of per-plate calibrated sample concentrations (scale-free: each plate is calibrated on its own
+def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray], model: str = "loglog") -> dict:
+    """Agreement of per-plate calibrated sample concentrations (no detection limit applied to either side) (scale-free: each plate is calibrated on its own
     standards, so different rectangle/threshold choices only matter through the bands' relative intensities)."""
     from scipy.stats import pearsonr, spearmanr
 

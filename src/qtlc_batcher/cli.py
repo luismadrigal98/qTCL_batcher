@@ -10,14 +10,14 @@ from pathlib import Path
 from .benchmark import calibrated_agreement, load_quant
 from .pipeline import Params, analyse_plate
 from .platemap import load_image_plate_map, load_platemap
-from .results import export_workbook, plate_tables, quality_flags
+from .results import export_workbook, needs_check, plate_tables, quality_flags
 
 PHOTO_PATTERNS = ("*.JPG", "*.jpg", "*.jpeg", "*.JPEG", "*.png", "*.PNG", "*.tif", "*.tiff")
 
 
 def _params(args) -> Params:
     return Params(min_peak_prom=args.min_peak_prom, divisor=args.divisor,
-                  rotate=getattr(args, "rotate", None), uint8_wrap=not args.no_uint8_wrap)
+                  rotate=getattr(args, "rotate", None), uint8_wrap=args.web_app_overflow)
 
 
 def _photos(folder) -> list[Path]:
@@ -57,7 +57,8 @@ def cmd_run(args) -> int:
             if it.get("error"):
                 print(f"FAIL  {it['image']}: {it['error']}", file=sys.stderr)
             else:
-                print(f"ok    {it['image']}" + (f"  [{len(it['flags'])} flag(s)]" if it["flags"] else ""))
+                n_chk = sum(f.startswith("CHECK") for f in it["flags"])
+                print(f"{'CHECK' if n_chk else 'ok':5s} {it['image']}" + (f"  [{n_chk} to check]" if n_chk else ""))
     if not any("res" in it for it in items):
         return 1
     export_workbook(args.out, items, params)
@@ -101,12 +102,13 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("run", cmd_run), ("benchmark", cmd_benchmark)):
         sp = sub.add_parser(name)
-        sp.add_argument("--min-peak-prom", type=float, default=5.0, help="qTLC MinPeakProm (web-app default 1; batch default 5)")
+        sp.add_argument("--min-peak-prom", type=float, default=3.0, help="qTLC MinPeakProm (web-app default 1; batch default 3)")
         sp.add_argument("--divisor", type=float, default=2.0, help="qTLC Divisor (default 2)")
-        sp.add_argument("--no-uint8-wrap", action="store_true",
-                        help="integrate correctly instead of reproducing the web app's uint8 overflow bug")
-        sp.add_argument("--calibration", choices=["linear", "loglog"], default="linear",
-                        help="standard-curve model: linear (qTLC paper) or loglog power law (see README)")
+        sp.add_argument("--web-app-overflow", action="store_true",
+                        help="reproduce the web app's uint8 overflow bug (only to compare with old web-app numbers)")
+        sp.add_argument("--no-uint8-wrap", action="store_true", help=argparse.SUPPRESS)   # old flag; now the default
+        sp.add_argument("--calibration", choices=["linear", "loglog"], default="loglog",
+                        help="standard-curve model: loglog power law (default) or linear (qTLC paper); see README")
         sp.set_defaults(fn=fn)
         if name == "run":
             sp.add_argument("photos", help="folder with plate photos")
