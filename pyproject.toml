@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qtlc-batcher"
+version = "0.1.0"
+description = "Batch re-implementation of the qTLC web app (Mac Fhionnlaoich et al., J. Chem. Educ. 2018) for anthocyanin TLC plates"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pillow>=10",
+    "pandas>=2",
+    "openpyxl>=3.1",
+    "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+qtlc-batch = "qtlc_batcher.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

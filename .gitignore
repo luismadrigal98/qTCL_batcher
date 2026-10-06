@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+# batch outputs / QA overlays
+outputs/
+# Excel lock files
+~$*
