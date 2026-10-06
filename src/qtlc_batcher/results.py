@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -101,6 +102,7 @@ def export_workbook(path, items: list[dict], params) -> None:
         flags += [dict(image=res.image, plate=it.get("plate"), flag=f) for f in it.get("flags", [])]
     if not tidy:
         raise ValueError("nothing to export")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(path) as xw:
         pd.concat(tidy).to_excel(xw, sheet_name="Tidy", index=False)
         pd.DataFrame(wide).to_excel(xw, sheet_name="Integrals", index=False)

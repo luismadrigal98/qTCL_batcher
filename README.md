@@ -49,7 +49,7 @@ qtlc-batch run ../Phenotyping/TLC_plate_photos \
     --image-plates examples/image_plates_benchmark.csv
 ```
 
-About 4–6 s per photo (66 photos ≈ 5–8 min). A failing photo is reported and skipped; the batch continues.
+About 3–5 s per photo (66 photos ≈ 4–6 min); the output folder is created if missing. A failing photo is reported and skipped; the batch continues.
 Useful options: `--min-peak-prom 5` `--divisor 2` `--rotate 180` (default: automatic) `--no-uint8-wrap` (see §5).
 
 ### B. GUI (review and correct)
@@ -105,7 +105,7 @@ whenever two vertically adjacent pixels of the background-corrected image sum to
   bands (e.g. concentrated standards, pelargonidin in rich samples) can exceed it.
 - **Effect:** the value is *lower* than the true integral, by up to ≈ 35–60 % in the cases seen, and not monotonic in
   signal (a synthetic peak of 200 integrates to *less* than one of 100). Only the affected columns are wrong.
-- **Extent in your data:** 8 of the 756 values in the benchmark workbook (4 plates, 1 standard lane) would be affected.
+- **Extent in your data:** at the web app's default settings, 8 of the 756 values in the benchmark workbook (4 plates, 1 standard lane) are affected.
   Since collaborators used the web app, those historical numbers carry the bug.
 - **Behaviour here:** by default the bug is **reproduced** (`uint8_wrap` on) so results are comparable with web-app
   numbers. Affected cells are shaded orange in the GUI and listed in the **Flags** sheet. To get the mathematically
@@ -146,7 +146,7 @@ S31.25 standard is nearly empty and the 3-point calibration is ill-conditioned; 
 |---|---|
 | `qtlc-batch: command not found` | `source ~/venvs/qtlc/bin/activate` first |
 | `venv` creation fails inside the project folder | create it in `~` as in §1 |
-| GUI does not start (Linux, `xcb` plugin) | `sudo apt install libxcb-cursor0 libxkbcommon-x11-0`; on a server use `QT_QPA_PLATFORM=offscreen` |
+| GUI does not start (Linux, "could not load the Qt platform plugin xcb") | install the missing xcb library named in the message, usually `sudo apt install libxcb-xinerama0`; on a headless server use `QT_QPA_PLATFORM=offscreen` |
 | `could not determine plate orientation / no lane comb` | photo has no usable lanes; process it in the GUI with *Rotation* set by hand, or crop the photo |
 | Plate flagged "standards are not decreasing" | boxes are misplaced (or the plate is mislabelled): fix in the GUI |
 | Numbers differ from the web page | check parameters (MinPeakProm 5 here, 1 there) and the overflow option |
