@@ -23,6 +23,7 @@ class Calibration:
     conc: np.ndarray         # [band, sample] calibrated concentration (NaN if the curve is unusable)
     model: str = "linear"
     outside: np.ndarray = None  # [band, sample] -1 below the weakest / +1 above the strongest standard / 0 inside
+    n_standards_used: np.ndarray = None  # [band] standards in the fit (loglog drops standards with zero signal)
 
 
 def calibrate(values: np.ndarray, standard_conc=STANDARD_CONC, model: str = "linear") -> Calibration:
@@ -42,6 +43,7 @@ def calibrate(values: np.ndarray, standard_conc=STANDARD_CONC, model: str = "lin
     slope, icpt, r2 = np.full(n_bands, np.nan), np.full(n_bands, np.nan), np.full(n_bands, np.nan)
     conc = np.full((n_bands, n_lanes - N_STANDARDS), np.nan)
     outside = np.zeros((n_bands, n_lanes - N_STANDARDS), dtype=int)
+    n_used = np.full(n_bands, N_STANDARDS)
     for b in range(n_bands):
         y = values[b, :N_STANDARDS]
         ys = values[b, N_STANDARDS:]
@@ -54,14 +56,17 @@ def calibrate(values: np.ndarray, standard_conc=STANDARD_CONC, model: str = "lin
             if a > 0:
                 conc[b] = np.clip((ys - c) / a, 0, None)
         else:
-            if (y <= 0).any():
-                continue                          # a standard with no signal: no power law through it
-            lx, ly = np.log(x), np.log(y)
+            use = y > 0                           # a standard with no signal cannot sit on a power law
+            if use.sum() < 2:
+                continue
+            lx, ly = np.log(x[use]), np.log(y[use])
             a, c = np.polyfit(lx, ly, 1)
-            slope[b], icpt[b], r2[b] = a, c, np.corrcoef(lx, ly)[0, 1] ** 2
+            slope[b], icpt[b] = a, c
+            r2[b] = np.corrcoef(lx, ly)[0, 1] ** 2 if use.sum() > 2 else np.nan   # 2 points: R2 meaningless
+            n_used[b] = int(use.sum())
             if a > 0:
                 conc[b] = np.where(ys > 0, np.exp((np.log(np.maximum(ys, 1e-12)) - c) / a), 0.0)
-    return Calibration(slope, icpt, r2, conc, model, outside)
+    return Calibration(slope, icpt, r2, conc, model, outside, n_used)
 
 
 def quality_flags(res: PlateResult, cal: Calibration, rotated_turns: int = 0) -> list[str]:
@@ -82,6 +87,18 @@ def quality_flags(res: PlateResult, cal: Calibration, rotated_turns: int = 0) ->
         where = ", ".join(f"band {b + 1}/lane {k + 1}" for b, k in cells[:4])
         flags.append(f"web-app uint8 overflow hit {n_over} columns ({where}): bands are under-integrated "
                      f"(re-run with uint8_wrap off for the correct value)")
+    if res.top_touch is not None:
+        streaky = [k for k in range(N_STANDARDS, res.values.shape[1])
+                   if res.top_touch[0, k] >= 0.15 and res.values[0, k] > 1000]
+        if streaky:
+            flags.append("streak from the solvent front runs into the band-1 box of sample(s) " +
+                         ", ".join(str(k - N_STANDARDS + 1) for k in streaky) +
+                         ": band 1 (pelargonidin) may be smear, not pigment - check / tighten the box")
+    if cal.n_standards_used is not None:
+        for b in np.nonzero(cal.n_standards_used < N_STANDARDS)[0]:
+            if np.isfinite(cal.slope[b]):
+                flags.append(f"{BAND_NAMES[b]}: a standard has no signal; power law fitted through "
+                             f"{cal.n_standards_used[b]} standards")
     if cal.outside is not None:
         above = [(b, k) for b, k in np.argwhere(cal.outside > 0) if res.values[b, k + N_STANDARDS] > 0]
         if above:

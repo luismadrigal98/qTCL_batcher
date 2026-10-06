@@ -51,7 +51,7 @@ def compare(mine: np.ndarray, ref: np.ndarray) -> dict:
     )
 
 
-def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray]) -> dict:
+def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray], model: str = "linear") -> dict:
     """Agreement of per-plate calibrated sample concentrations (scale-free: each plate is calibrated on its own
     standards, so different rectangle/threshold choices only matter through the bands' relative intensities)."""
     from scipy.stats import pearsonr, spearmanr
@@ -60,7 +60,7 @@ def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray]) -> dict:
 
     h, a = [], []
     for m, r in zip(mine, ref):
-        cm, cr = calibrate(m).conc, calibrate(r).conc
+        cm, cr = calibrate(m, model=model).conc, calibrate(r, model=model).conc
         ok = np.isfinite(cm) & np.isfinite(cr)
         h.append(cr[ok]); a.append(cm[ok])
     h, a = np.concatenate(h), np.concatenate(a)

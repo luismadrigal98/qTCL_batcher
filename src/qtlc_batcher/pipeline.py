@@ -32,6 +32,8 @@ class PlateResult:
     masks: dict = field(repr=False, default_factory=dict)     # (lane, band) -> bool mask of integrated pixels
     overflow_cols: np.ndarray = field(repr=False, default=None)  # [band, lane] columns hit by the uint8 wrap
     turns: int = 0                         # 90-degree CCW turns applied to the photo
+    top_touch: np.ndarray = field(repr=False, default=None)   # [band, lane] share of integrated columns whose
+                                                              # integration reaches the box's top edge (streaks)
 
 
 def rect_slice(rect, origin, shape):
@@ -71,6 +73,7 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
     n_lanes, n_bands = layout.rects.shape[:2]
     values = np.zeros((n_bands, n_lanes))
     overflow = np.zeros((n_bands, n_lanes), dtype=int)
+    top_touch = np.zeros((n_bands, n_lanes))
     masks = {}
     for k in range(n_lanes):
         for b in range(n_bands):
@@ -81,4 +84,8 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
                 continue
             values[b, k], masks[(k, b)], overflow[b, k] = integrate_band(
                 sub, params.min_peak_prom, params.divisor, params.uint8_wrap)
-    return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns)
+            cols = masks[(k, b)].any(axis=0)
+            if cols.any():   # a real band is a blob inside the box; a streak from the front enters at the top
+                top_touch[b, k] = float((masks[(k, b)][0] & cols).sum() / cols.sum())
+    return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns,
+                       top_touch)

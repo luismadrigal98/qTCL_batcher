@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .benchmark import calibrated_agreement, load_quant
@@ -28,28 +30,51 @@ def _photos(folder) -> list[Path]:
     return sorted(out)
 
 
+def _process_one(job):
+    """One photo -> export item. Runs in a worker process; never raises (one bad photo must not stop a batch)."""
+    path, plate, params, platemap, model = job
+    try:
+        res = analyse_plate(path, params)
+        df, cal = plate_tables(res, plate, platemap, model=model)
+    except Exception as e:
+        return dict(image=path.name, plate=plate, error=str(e))
+    flags = quality_flags(res, cal, res.turns)     # needs the full result, so before trimming it
+    res.processed, res.masks = None, {}            # not needed for export; keeps inter-process traffic small
+    return dict(image=path.name, plate=plate, res=res, df=df, cal=cal, flags=flags)
+
+
 def cmd_run(args) -> int:
     params = _params(args)
     img_plate = load_image_plate_map(args.image_plates) if args.image_plates else {}
     platemap = load_platemap(args.platemap) if args.platemap else None
+    jobs = [(p, img_plate.get(p.name) or img_plate.get(p.stem) or img_plate.get(p.stem.replace("IMG_", "")),
+             params, platemap, args.calibration) for p in _photos(args.photos)]
+    n_workers = max(1, min(args.jobs, len(jobs)))
     items = []
-    for p in _photos(args.photos):
-        plate = img_plate.get(p.name) or img_plate.get(p.stem) or img_plate.get(p.stem.replace("IMG_", ""))
-        try:
-            res = analyse_plate(p, params)
-            df, cal = plate_tables(res, plate, platemap, model=args.calibration)
-        except Exception as e:  # one bad photo must not stop a batch
-            print(f"FAIL  {p.name}: {e}", file=sys.stderr)
-            items.append(dict(image=p.name, plate=plate, error=str(e)))
-            continue
-        fl = quality_flags(res, cal, res.turns)
-        items.append(dict(image=p.name, plate=plate, res=res, df=df, cal=cal, flags=fl))
-        print(f"ok    {p.name}" + (f"  [{len(fl)} flag(s)]" if fl else ""))
+    with ProcessPoolExecutor(n_workers) if n_workers > 1 else _Serial() as ex:
+        for it in ex.map(_process_one, jobs):
+            items.append(it)
+            if it.get("error"):
+                print(f"FAIL  {it['image']}: {it['error']}", file=sys.stderr)
+            else:
+                print(f"ok    {it['image']}" + (f"  [{len(it['flags'])} flag(s)]" if it["flags"] else ""))
     if not any("res" in it for it in items):
         return 1
     export_workbook(args.out, items, params)
     print(f"wrote {args.out}")
     return 0
+
+
+class _Serial:
+    """Drop-in for ProcessPoolExecutor when --jobs 1 (easier debugging, no subprocesses)."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def map(self, fn, it):
+        return map(fn, it)
 
 
 def cmd_benchmark(args) -> int:
@@ -63,9 +88,9 @@ def cmd_benchmark(args) -> int:
             continue
         ref.append(plate.values)
         mine.append(res.values)
-        a = calibrated_agreement([res.values], [plate.values])
+        a = calibrated_agreement([res.values], [plate.values], model=args.calibration)
         print(f"{plate.plate:6s} {plate.image_file}  calibrated r={a['pearson']:.3f}  rank={a['spearman']:.3f}")
-    a = calibrated_agreement(mine, ref)
+    a = calibrated_agreement(mine, ref, model=args.calibration)
     print(f"\nall plates: calibrated sample concentrations, {a['n']} values: pearson {a['pearson']:.3f}, "
           f"spearman {a['spearman']:.3f}, median ratio auto/benchmark {a['median_ratio']:.2f}")
     return 0
@@ -80,6 +105,8 @@ def main(argv=None) -> int:
         sp.add_argument("--divisor", type=float, default=2.0, help="qTLC Divisor (default 2)")
         sp.add_argument("--no-uint8-wrap", action="store_true",
                         help="integrate correctly instead of reproducing the web app's uint8 overflow bug")
+        sp.add_argument("--calibration", choices=["linear", "loglog"], default="linear",
+                        help="standard-curve model: linear (qTLC paper) or loglog power law (see README)")
         sp.set_defaults(fn=fn)
         if name == "run":
             sp.add_argument("photos", help="folder with plate photos")
@@ -87,8 +114,8 @@ def main(argv=None) -> int:
             sp.add_argument("--rotate", type=int, default=None, help="degrees CCW (multiple of 90); default: auto-detect")
             sp.add_argument("--platemap", help="workbook with the `TLC` sheet (plant / MeOH / flower mass per lane)")
             sp.add_argument("--image-plates", help="CSV/Excel with columns image,plate (which plate each photo shows)")
-            sp.add_argument("--calibration", choices=["linear", "loglog"], default="linear",
-                            help="standard-curve model: linear (qTLC paper) or loglog power law (see README)")
+            sp.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1),
+                            help="photos processed in parallel (default: up to 4 cores; ~0.6 GB RAM each)")
         else:
             sp.add_argument("xlsx", help="workbook with the benchmark `Quant` sheet")
             sp.add_argument("photos")

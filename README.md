@@ -49,8 +49,10 @@ qtlc-batch run ../Phenotyping/TLC_plate_photos \
     --image-plates examples/image_plates_benchmark.csv
 ```
 
-About 3–5 s per photo (66 photos ≈ 4–6 min); the output folder is created if missing. A failing photo is reported and skipped; the batch continues.
-Useful options: `--min-peak-prom 5` `--divisor 2` `--rotate 180` (default: automatic) `--no-uint8-wrap` (see §5).
+Photos are processed in parallel (`--jobs`, default up to 4 cores, ~0.6 GB RAM each); the output folder is created if
+missing. A failing photo is reported and skipped; the batch continues.
+Useful options: `--min-peak-prom 5` `--divisor 2` `--rotate 180` (default: automatic) `--no-uint8-wrap` (see §5)
+`--calibration loglog` (see §4) `--jobs 1` (one at a time, e.g. on a small laptop).
 
 ### B. GUI (review and correct)
 
@@ -64,10 +66,12 @@ qtlc-gui ../Phenotyping/TLC_plate_photos
    calibrated samples, standard-curve R², and **Flags**.
 3. Fix problems: **drag a box** to move it, **drag an edge** to resize it; the plate recomputes at once.
    Wheel = zoom, drag background = pan, *Fit* = reset the view, checkboxes toggle boxes / red overlay / processed image.
-   *Re-detect layout* throws away your edits for that plate; the *Rotation* box overrides the automatic rotation.
+   *Re-detect layout* throws away your edits for that plate; the *Rotation* box shows and overrides the selected
+   plate's rotation.
 4. Type the plate names in the **Plate** column (or *Image→plate…* to load the CSV; *Plate map…* to load the workbook).
 5. **Mark reviewed** when a plate is OK. Status: `pending` / `ok` / `flags` (look at it) / `reviewed`; `*` = rectangles edited by hand.
-6. Changing MinPeakProm / Divisor / kernel / overflow option recomputes the **current plate only** so you can explore.
+6. Changing MinPeakProm / Divisor / kernel / overflow option recomputes the **current plate only** (half a second after
+   you stop typing) so you can explore. The *Calibration* box re-fits every plate at once (no image processing).
    Press **Re-process all** to apply the same values to every plate (keeps rotation and rectangles). *Export Excel…*
    warns if plates were computed with different parameters.
 7. **Export Excel…** writes the workbook; **Save session… / Load session…** keep rotations, plate names, edits and parameters.
@@ -89,11 +93,27 @@ qtlc-batch benchmark ../Phenotyping/GenotpedPigmentExtractionSamplesList.xlsx ..
 | **Flags** | every reason a plate deserves a look (below) |
 | **Parameters** | MinPeakProm, Divisor, rotation, kernel, overflow option used |
 
-Calibration: per plate and per band, a linear fit of integral vs. the standards (500, 125, 31.25), inverted for the samples
-(negative values clipped to 0).
+**Calibration** (per plate, per band, on the plate's own standards 500 / 125 / 31.25), two models:
 
-**Flags:** *standards not decreasing* (S500 > S125 > S31.25 broken in band 2/3 → boxes probably misplaced);
-*standard-curve R² < 0.95*; *uint8 overflow* (§5); *photo was rotated N degrees*; *rectangles were edited manually*.
+- `linear` (default; what the qTLC paper does): straight line, inverted for the samples; values below the intercept → 0.
+- `loglog`: power law, log(signal) vs log(concentration). **The standards are not linear**: on the 28 benchmark plates the
+  S500/S125 signal ratio is 2.44 instead of 4 (response exponent ≈ 0.73), and a straight line through S500 and S31.25
+  under-predicts the middle standard by 18 % (power law: 4 %). The straight line therefore biases mid-range samples and
+  clips some visible ones to 0. Choose with `--calibration` / the GUI *Calibration* box; the `calibration` column records it.
+
+**Flags** (Flags sheet / GUI panel):
+
+| Flag | Meaning / what to do |
+|---|---|
+| *layout: plate tilted N degrees (corrected)* | informational; boxes follow the tilt |
+| *layout: lane(s) … band position at the search limit* | that lane's bands sit higher/lower than the tilt predicts (streaks, uneven run) — check those boxes |
+| *layout: band-3 boxes shortened above the origin line* | bands run close to the pencil origin line; boxes stop above it |
+| *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear — tighten the box |
+| *standards are not decreasing S500 > S125 > S31.25* | boxes misplaced on the standards, or a bad plate |
+| *standard curve slope <= 0* / *R² < 0.95* | the band's calibration is unusable / weak |
+| *a standard has no signal; power law fitted through 2 standards* | `loglog` only |
+| *extrapolated above the S500 standard* | sample stronger than the top standard: outside the calibrated range |
+| *uint8 overflow* (§5), *photo was rotated*, *rectangles were edited manually* | as named |
 
 ## 5. Known bug in the qTLC web app (reproduced here; documented on purpose)
 
@@ -127,8 +147,11 @@ Excel. The engine accepts any value, so web-app parity is one option away (`--mi
 Rotation (0/90/180/270) from lane-comb contrast and the position of the brown solvent-front spots (upside-down photos are
 common: 33 of 66 in the current set). Nine lanes by fitting a regular comb to a "magenta-ness" map `(R+B)/2 − G`
 (ignores brown spots and pencil marks; large pink objects such as a pencil are suppressed). Bands from the summed standard
-lanes, tracked per lane for plate tilt; rectangle limits sit midway between neighbouring bands. The background kernel is
-the web-app rule applied to the largest-band rectangle: round(diagonal / 2) pixels.
+lanes. **Plate tilt** is measured from the straight pencil lines (origin line, solvent front) by a projection-profile
+search (±5°); every lane is placed on that tilt and then corrected by at most a quarter of the band spacing, so a lane whose
+top band is empty (most samples) can never slip down by a whole band. Boxes are axis-aligned like in the web app; their
+limits sit midway between neighbouring bands and are clipped so they stop above the origin line and below the solvent
+front. The background kernel is the web-app rule applied to the largest-band rectangle: round(diagonal / 2) pixels.
 
 ## 8. Validation against the collaborators' Excel
 
@@ -146,6 +169,8 @@ S31.25 standard is nearly empty and the 3-point calibration is ill-conditioned; 
 |---|---|
 | `qtlc-batch: command not found` | `source ~/venvs/qtlc/bin/activate` first |
 | `venv` creation fails inside the project folder | create it in `~` as in §1 |
+| Boxes one band too low/high on a tilted plate | fixed in v0.2 (tilt model); if it recurs, the flag *search limit* names the lane — drag the boxes |
+| Streaks: band 1 shows signal in samples that look pelargonidin-free | the *streak* flag; drag the band-1 box down to the real band edge |
 | GUI does not start (Linux, "could not load the Qt platform plugin xcb") | install the missing xcb library named in the message, usually `sudo apt install libxcb-xinerama0`; on a headless server use `QT_QPA_PLATFORM=offscreen` |
 | `could not determine plate orientation / no lane comb` | photo has no usable lanes; process it in the GUI with *Rotation* set by hand, or crop the photo |
 | Plate flagged "standards are not decreasing" | boxes are misplaced (or the plate is mislabelled): fix in the GUI |

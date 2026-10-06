@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qtlc-batcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "Batch re-implementation of the qTLC web app (Mac Fhionnlaoich et al., J. Chem. Educ. 2018) for anthocyanin TLC plates"
 requires-python = ">=3.10"
 dependencies = [
