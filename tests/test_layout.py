@@ -92,7 +92,7 @@ def test_end_to_end_synthetic_plate_flags_and_workbook(tmp_path):
     assert all(f.startswith(("CHECK: ", "note: ")) for f in flags)
     assert any("plate tilted" in f for f in flags)                 # tilt reported as a note
     assert not any("streak" in f for f in flags)                    # clean synthetic lanes: no streak flag
-    assert (res.values[0, 3:] < 0.02 * res.values[0, 0]).all()      # samples have no band 1 -> ~0 pelargonidin
+    assert (res.values[0, 3:] < res.lod[0]).all()                   # samples have no band 1: below detection
     out = tmp_path / "sub" / "r.xlsx"
     export_workbook(out, [dict(image="plate.png", plate="AP0", res=res, df=df, cal=cal, flags=flags)], res.params)
     sheets = pd.read_excel(out, sheet_name=None)

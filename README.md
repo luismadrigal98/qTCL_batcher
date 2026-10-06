@@ -20,7 +20,7 @@ source ~/venvs/qtlc/bin/activate
 pip install --upgrade pip
 cd "/mnt/1692B2EF92B2D28B/GRA/Anthocyanin_project/TCL Imaging/qTCL_batcher"
 pip install -e ".[gui,dev]"
-pytest -q                      # 13 tests should pass
+pytest -q                      # 21 tests should pass
 ```
 
 Every later session starts with `source ~/venvs/qtlc/bin/activate`. (`-e` = editable: code changes apply immediately.)
@@ -51,8 +51,9 @@ qtlc-batch run ../Phenotyping/TLC_plate_photos \
 
 Photos are processed in parallel (`--jobs`, default up to 4 cores, ~0.6 GB RAM each); the output folder is created if
 missing. A failing photo is reported and skipped; the batch continues.
-Useful options: `--min-peak-prom 5` `--divisor 2` `--rotate 180` (default: automatic) `--no-uint8-wrap` (see §5)
-`--calibration loglog` (see §4) `--jobs 1` (one at a time, e.g. on a small laptop).
+Defaults: MinPeakProm 3, Divisor 2, log-log calibration, correct integral, blank-based detection limit (§4, §6).
+Options: `--min-peak-prom` `--divisor` `--rotate 180` (default: automatic) `--calibration linear` (qTLC paper's line)
+`--web-app-overflow` (reproduce the web app's bug, §5) `--jobs 1` (one photo at a time, e.g. on a small laptop).
 
 ### B. GUI (review and correct)
 
@@ -62,14 +63,16 @@ qtlc-gui ../Phenotyping/TLC_plate_photos
 
 1. **Process all** — rotation, lanes, bands and integration for every plate (runs in the background, progress bar at the bottom).
 2. Click a plate in the left list. Centre: coloured boxes = band rectangles (orange band 1, green band 2, blue band 3),
-   **red = exactly the pixels that were integrated**. Right: integrals (rows = bands, columns = S500, S125, S31.25, 1–6),
-   calibrated samples, standard-curve R², and **Flags**.
+   **red = exactly the pixels that were integrated**. Right: integrals (rows = bands, columns = S500, S125, S31.25, 1–6;
+   grey = below the plate's detection limit), calibrated samples, standard-curve R², detection limits, and **Flags**.
 3. Fix problems: **drag a box** to move it, **drag an edge** to resize it; the plate recomputes at once.
+   Tick **Edit all lanes of that band together** to apply one drag to the same band in every lane (keeps the tilt).
    Wheel = zoom, drag background = pan, *Fit* = reset the view, checkboxes toggle boxes / red overlay / processed image.
    *Re-detect layout* throws away your edits for that plate; the *Rotation* box shows and overrides the selected
    plate's rotation.
 4. Type the plate names in the **Plate** column (or *Image→plate…* to load the CSV; *Plate map…* to load the workbook).
-5. **Mark reviewed** when a plate is OK. Status: `pending` / `ok` / `flags` (look at it) / `reviewed`; `*` = rectangles edited by hand.
+5. Status: `pending` / `ok` / `check` (has a CHECK flag) / `reviewed`; `*` = rectangles edited by hand.
+   **Only plates to check** hides the rest; **Next to check ▶** (key **N**) jumps to the next one; **Mark reviewed** (key **R**).
 6. Changing MinPeakProm / Divisor / kernel / overflow option recomputes the **current plate only** (half a second after
    you stop typing) so you can explore. The *Calibration* box re-fits every plate at once (no image processing).
    Press **Re-process all** to apply the same values to every plate (keeps rotation and rectangles). *Export Excel…*
@@ -93,30 +96,37 @@ qtlc-batch benchmark ../Phenotyping/GenotpedPigmentExtractionSamplesList.xlsx ..
 | **Flags** | every reason a plate deserves a look (below) |
 | **Parameters** | MinPeakProm, Divisor, rotation, kernel, overflow option used |
 
+**Detection limit.** Each plate gets a limit of detection per band: empty boxes of the same size are integrated in the
+blank plate between neighbouring lanes, and LOD = blank mean + 3 SD (the usual analytical definition). The Tidy sheet has
+`lod` and `detected`; a sample below the LOD is reported with `calibrated` = 0 (not detected), and a standard below it is
+left out of that band's curve. On the current photos the faintest standard (S31.25) clears its plate's LOD in 90 % of
+cases, while 166 of 217 empty band-1 slots in clean sample lanes fall below it.
+
 **Calibration** (per plate, per band, on the plate's own standards 500 / 125 / 31.25), two models:
 
-- `linear` (default; what the qTLC paper does): straight line, inverted for the samples; values below the intercept → 0.
-- `loglog`: power law, log(signal) vs log(concentration). **The standards are not linear**: on the 28 benchmark plates the
-  S500/S125 signal ratio is 2.44 instead of 4 (response exponent ≈ 0.73), and a straight line through S500 and S31.25
-  under-predicts the middle standard by 18 % (power law: 4 %). The straight line therefore biases mid-range samples and
-  clips some visible ones to 0. Choose with `--calibration` / the GUI *Calibration* box; the `calibration` column records it.
+- `loglog` (default): power law, log(signal) vs log(concentration).
+- `linear` (what the qTLC paper does): straight line, inverted for the samples; values below the intercept → 0.
+
+**The standards are not linear.** S500/S125 signal ratio ≈ 2.4–2.9 instead of 4 (response exponent ≈ 0.73), in the
+collaborators' numbers and in ours. Predicting the middle standard from the outer two, a straight line is off by 16–18 %
+(bias 0.82–0.84); the power law by 2–4 % (0.96–0.98). The `calibration` column records the model used.
 
 **Flags** (Flags sheet, sorted CHECK first; GUI panel). A plate's status is `check` only if it has a CHECK flag.
 
-| Severity | Flag | Meaning / what to do |
+| Severity | Flag | Meaning / what to do (see §10) |
 |---|---|---|
-| CHECK | *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear — tighten the box |
-| CHECK | *layout: lane(s) … bands far from the other lanes' positions* | that lane runs higher/lower than the rest of the plate (overloaded sample, streak, uneven front) — check those boxes |
+| CHECK | *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear |
+| CHECK | *layout: lane(s) … bands far from the other lanes' positions* | that sample lane runs higher/lower than the rest (overloaded sample, streak, uneven front) |
 | CHECK | *standards are not decreasing S500 > S125 > S31.25* | boxes misplaced on the standards, or a bad plate |
 | CHECK | *standard curve slope <= 0* / *R² < 0.90* | the band's calibration is unusable / weak |
-| CHECK | *uint8 overflow* (§5) | web-app parity value is too low; rerun with `--no-uint8-wrap` for the true value |
-| note | *standard curve R² 0.90–0.95* | weak but usable curve (often the curvature in §4) |
+| CHECK | *uint8 overflow* | only with `--web-app-overflow`: the web-app value is too low (§5) |
+| note | *standard curve R² 0.90–0.95* | weak but usable curve |
+| note | *a standard is below the detection limit; curve fitted through 2 standards* | that band's curve has two points only |
 | note | *extrapolated above the S500 standard* | sample stronger than the top standard: outside the calibrated range |
 | note | *layout: plate tilted N degrees (corrected)* / *band-3 boxes shortened above the origin line* | informational |
-| note | *a standard has no signal; power law fitted through 2 standards* | `loglog` only |
 | note | *photo was rotated* / *rectangles were edited manually* | as named |
 
-## 5. Known bug in the qTLC web app (reproduced here; documented on purpose)
+## 5. Known bug in the qTLC web app (documented; reproducible on request)
 
 While reverse-engineering the server (synthetic test images with known pixel values) we found that **www.qtlc.app
 under-integrates bright bands**. The trapezoid pair sums `v[i] + v[i+1]` are computed in **8-bit unsigned arithmetic**:
@@ -128,20 +138,29 @@ whenever two vertically adjacent pixels of the background-corrected image sum to
   signal (a synthetic peak of 200 integrates to *less* than one of 100). Only the affected columns are wrong.
 - **Extent in your data:** at the web app's default settings, 8 of the 756 values in the benchmark workbook (4 plates, 1 standard lane) are affected.
   Since collaborators used the web app, those historical numbers carry the bug.
-- **Behaviour here:** by default the bug is **reproduced** (`uint8_wrap` on) so results are comparable with web-app
-  numbers. Affected cells are shaded orange in the GUI and listed in the **Flags** sheet. To get the mathematically
-  correct integral use `--no-uint8-wrap` (CLI) or untick *Reproduce web-app uint8 overflow* (GUI) and re-process.
-- For new analyses, prefer the corrected integral, or at least check the flagged cells.
+- **Behaviour here:** by default the integral is **correct** (no overflow). `--web-app-overflow` (CLI) or *Reproduce
+  web-app uint8 overflow bug* (GUI) reproduces the bug, only to compare with old web-app numbers; then affected cells are
+  shaded orange in the GUI and listed in the **Flags** sheet.
 
 Everything else (gray conversion, top-hat background, peak/Divisor integration) matches the server exactly:
 27/27 band values of a real plate and ~240 synthetic columns are identical (`tests/test_server_parity.py`).
 
 ## 6. Defaults differ from the web app on purpose
 
-Batch default **MinPeakProm = 5** (web app: 1), Divisor 2. With 1, the faint smear above empty band-1 slots is integrated
-(hundreds to thousands of units); the collaborators tuned the value until empty bands read ~0 (see
-`TLC_Imaging_Documents/qTLC notes.docx`). MinPeakProm 5 with narrower rectangles gave the best agreement with their
-Excel. The engine accepts any value, so web-app parity is one option away (`--min-peak-prom 1`).
+Batch defaults: **MinPeakProm 3** (web app: 1), Divisor 2, log-log calibration, correct integral, detection limit.
+MinPeakProm decides which pixel columns count as signal. Too low and the faint haze in empty slots is integrated; too high
+and the edges of every faint band are discarded, so faint bands (the S31.25 standard, low-pigment samples) are
+under-read and the calibration bends. Measured on all 66 photos:
+
+| MinPeakProm | S31.25 / S125 (expected ≈ 0.35) | curves whose S31.25 is lost | empty-slot noise (band 1) |
+|---|---|---|---|
+| 1 | 0.34 | 4 / 198 | ~1,800 |
+| 3 | 0.33 | 16 / 198 | ~1,550 |
+| 5 | 0.06 | **135 / 198** | ~65 |
+
+MinPeakProm 5 (the v0.1/v0.2 default) silenced empty slots but destroyed the lowest standard; 3 keeps it, and the
+remaining empty-slot noise is handled by the detection limit (§4) instead. Web-app parity is one option away
+(`--min-peak-prom 1 --calibration linear --web-app-overflow`).
 
 ## 7. How the automatic layout works
 
@@ -149,8 +168,10 @@ Rotation (0/90/180/270) from lane-comb contrast and the position of the brown so
 common: 33 of 66 in the current set). Nine lanes by fitting a regular comb to a "magenta-ness" map `(R+B)/2 − G`
 (ignores brown spots and pencil marks; large pink objects such as a pencil are suppressed). Bands from the summed standard
 lanes. **Plate tilt** is measured from the straight pencil lines (origin line, solvent front) by a projection-profile
-search (±5°); every lane is placed on that tilt and then corrected by at most a quarter of the band spacing, so a lane whose
-top band is empty (most samples) can never slip down by a whole band. Boxes are axis-aligned like in the web app; their
+search (±5°). Every lane with pigment is then measured within ±0.45 band spacings (never enough to mistake a band for
+its neighbour); a robust trend through those lanes absorbs any remaining tilt or "smile" of the front, and each lane is
+refined ±0.2 band spacings around that trend (empty lanes follow the trend). A lane whose top band is empty (most samples)
+therefore cannot slip down by a whole band. Boxes are axis-aligned like in the web app; their
 limits sit midway between neighbouring bands and are clipped so they stop above the origin line and below the solvent
 front. The background kernel is the web-app rule applied to the largest-band rectangle: round(diagonal / 2) pixels.
 
@@ -158,12 +179,19 @@ front. The background kernel is the web-app rule applied to the largest-band rec
 
 The Excel is *not* ground truth: each person drew their own rectangles and chose their own thresholds. Absolute integrals
 differ by a roughly constant factor, so the comparison uses concentrations **calibrated on each plate's own three
-standards** (scale-free). Current `qtlc-batch benchmark` result (v0.2: tilt model + box clipping; 28 plates, 504
-calibrated sample values, default parameters, linear calibration, fully automatic, no manual correction): **Pearson 0.95,
-Spearman 0.89, median ratio auto/benchmark 1.05** (v0.1: 0.88 / 0.86 / 1.04). 23 of 28 plates have r ≥ 0.90; the lowest
-are AP35 (0.56), AP31 (0.81), AP62 (0.88), AP42 (0.89), AP38 (0.89). Agreement between two calibrated *noisy* datasets cannot
-choose the calibration model (log-log scores lower on it because it amplifies faint-band noise on both sides); the
-middle-standard test in §4 is the relevant evidence for that choice.
+standards** (scale-free; no detection limit applied). `qtlc-batch benchmark`, 28 plates, 504 calibrated sample values,
+fully automatic:
+
+| Version / settings | Pearson | Spearman | median ratio |
+|---|---|---|---|
+| v0.1 (MinPeakProm 5, linear) | 0.88 | 0.86 | 1.04 |
+| v0.2 layout fix (MinPeakProm 5, linear) | 0.95 | 0.89 | 1.05 |
+| current defaults viewed with a linear curve (MinPeakProm 3) | 0.93 | 0.90 | 1.02 |
+| current defaults (MinPeakProm 3, log-log) | 0.89 | 0.88 | 1.03 |
+
+Agreement with a noisy human dataset cannot choose the calibration model: log-log scores lower here partly because it
+amplifies faint-band noise on *both* sides. The middle-standard test (§4) and the faint-standard table (§6) are the
+evidence for the defaults.
 
 ## 9. Troubleshooting
 
@@ -171,14 +199,36 @@ middle-standard test in §4 is the relevant evidence for that choice.
 |---|---|
 | `qtlc-batch: command not found` | `source ~/venvs/qtlc/bin/activate` first |
 | `venv` creation fails inside the project folder | create it in `~` as in §1 |
-| Boxes one band too low/high on a tilted plate | fixed in v0.2 (tilt model); if it recurs, the flag *search limit* names the lane — drag the boxes |
-| Streaks: band 1 shows signal in samples that look pelargonidin-free | the *streak* flag; drag the band-1 box down to the real band edge |
+| Boxes one band too low/high on a tilted plate | fixed in v0.2 (tilt + trend model); if it recurs, the *far from the other lanes* flag names the lane — drag the boxes |
+| Streaks: band 1 shows signal in samples that look pelargonidin-free | the *streak* flag; see §10 |
 | GUI does not start (Linux, "could not load the Qt platform plugin xcb") | install the missing xcb library named in the message, usually `sudo apt install libxcb-xinerama0`; on a headless server use `QT_QPA_PLATFORM=offscreen` |
 | `could not determine plate orientation / no lane comb` | photo has no usable lanes; process it in the GUI with *Rotation* set by hand, or crop the photo |
 | Plate flagged "standards are not decreasing" | boxes are misplaced (or the plate is mislabelled): fix in the GUI |
-| Numbers differ from the web page | check parameters (MinPeakProm 5 here, 1 there) and the overflow option |
+| Numbers differ from the web page | check parameters (MinPeakProm 3 here, 1 there), the calibration model, and the overflow option |
 
-## 10. Limitations / next steps
+## 10. Fixing what remains: the review pass
+
+Everything that software can decide reliably is automatic. What remains needs eyes, because no automatic rule tested so
+far separates smear from pigment without damaging good plates (valley-limited integration and smear-baseline subtraction
+both cut real bands and standards by 15–90 %). On the current 66 photos about 37 have a CHECK flag; most are quick:
+
+1. `qtlc-gui ../Phenotyping/TLC_plate_photos` → *Process all* → tick **Only plates to check** → press **N**.
+2. Read the Flags panel, then fix by flag:
+   - **streak into band 1**: tick *Edit all lanes of that band together*, drag the **top edge of a band-1 box** down to
+     where the band (not the smear) starts; all lanes follow. If no band is visible under the smear, the sample has no
+     detectable pelargonidin: shrink the box onto the empty slot.
+   - **lane far from the others**: drag that lane's boxes onto its bands (untick *Edit all lanes* first).
+   - **standards not decreasing / slope ≤ 0 / R² < 0.90**: look at the three standard lanes; fix misplaced boxes. If the
+     standards themselves look wrong (smeared, missing, front too close), the plate cannot be calibrated: re-run it.
+3. **R** marks the plate reviewed, **N** goes to the next one; *Save session…* now and then; *Export Excel…* at the end.
+
+**Plates to re-run in the lab** rather than fix in software: short runs where the bands sit under the solvent front
+(AP41 IMG_3126/3127, AP57 IMG_3145/3146), the curved-front plate AP54 (IMG_3141/3142), and the heavily smeared plates
+(AP40 IMG_3123–3125, AP65–AP75 IMG_3152–3159) if their band-1 values matter. Smearing and tailing on TLC usually come from
+overloaded spots or particles in the extract, so less extract per spot or a clarified (centrifuged) extract is the
+usual remedy; check this against your own protocol.
+
+## 11. Limitations / next steps
 
 - Lane count and band count are fixed at 9 × 3 in the automatic detector.
 - Plate name is not read from the photo.
