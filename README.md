@@ -222,6 +222,22 @@ both cut real bands and standards by 15–90 %). On the current 66 photos about 
      standards themselves look wrong (smeared, missing, front too close), the plate cannot be calibrated: re-run it.
 3. **R** marks the plate reviewed, **N** goes to the next one; *Save session…* now and then; *Export Excel…* at the end.
 
+**Editing and your data.** An edit changes the numbers of the plate you edit (that is the point), but it brings human
+judgement back, so keep it controlled:
+
+- Edits only move boxes; MinPeakProm, Divisor, background and calibration stay identical for every plate.
+- Every export keeps an **audit trail**: `integral_auto` / `calibrated_auto` (what the automatic boxes give with the same
+  settings) next to the edited values, and `box_edited` per box. Run your downstream analysis both ways (or without the
+  edited plates) to show the edits do not drive the result.
+- Editing a **standard** box changes the calibration, hence `calibrated` for every sample on that plate; edit standards
+  only when a box is clearly misplaced.
+- Tick **Blind review (hide numbers)** while placing boxes, so the values cannot influence where you draw them; decide
+  from the image only, with fixed rules (box edge at the dip between smear and band; empty slot if no band is visible).
+- One person reviewing all plates is more consistent than several; if several, have them overlap on a few plates and
+  compare.
+- The session file stores both the automatic and the edited boxes, so every edit is reproducible and reversible
+  (*Re-detect layout* restores the automatic boxes for a plate).
+
 **Plates to re-run in the lab** rather than fix in software: short runs where the bands sit under the solvent front
 (AP41 IMG_3126/3127, AP57 IMG_3145/3146), the curved-front plate AP54 (IMG_3141/3142), and the heavily smeared plates
 (AP40 IMG_3123–3125, AP65–AP75 IMG_3152–3159) if their band-1 values matter. Smearing and tailing on TLC usually come from

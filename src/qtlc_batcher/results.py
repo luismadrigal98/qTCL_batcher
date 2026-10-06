@@ -155,6 +155,24 @@ def plate_tables(res: PlateResult, plate: str | None = None, platemap: pd.DataFr
     return df, cal
 
 
+def add_audit_columns(df: pd.DataFrame, res: PlateResult, auto_res: PlateResult | None = None,
+                      auto_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Audit trail for manual edits: `integral_auto` / `calibrated_auto` are the values the automatic boxes give
+    with the same settings, `box_edited` marks the boxes moved by hand. For a plate without edits they equal the
+    reported values. Note that editing a *standard* box changes the calibration of every sample on that plate."""
+    df = df.copy()
+    if auto_res is None or auto_df is None:
+        df["box_edited"] = False
+        df["integral_auto"], df["calibrated_auto"] = df["integral"], df["calibrated"]
+        return df
+    moved = np.abs(res.layout.rects - auto_res.layout.rects).max(axis=2) > 0.5          # [lane, band]
+    auto = auto_df.set_index(["lane_index", "band"])[["integral", "calibrated"]]
+    auto.columns = ["integral_auto", "calibrated_auto"]
+    df = df.join(auto, on=["lane_index", "band"])
+    df["box_edited"] = [bool(moved[k - 1, b - 1]) for k, b in zip(df["lane_index"], df["band"])]
+    return df
+
+
 def export_workbook(path, items: list[dict], params) -> None:
     """Write the batch workbook. Each item: dict(res=PlateResult|None, plate=str|None, df=DataFrame|None,
     cal=Calibration|None, flags=list[str], image=str, error=str|None)."""
@@ -165,7 +183,8 @@ def export_workbook(path, items: list[dict], params) -> None:
                               flag=f"processing failed: {it['error']}"))
             continue
         res = it["res"]
-        tidy.append(it["df"])
+        df = it["df"]
+        tidy.append(df if "box_edited" in df.columns else add_audit_columns(df, res))
         for b in range(res.values.shape[0]):
             wide.append(dict(image=res.image, plate=it.get("plate"), band=BAND_NAMES[b],
                              **{f"lane {k + 1}": res.values[b, k] for k in range(res.values.shape[1])}))

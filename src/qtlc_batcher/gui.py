@@ -18,7 +18,7 @@ from . import imaging
 from .layout import Layout
 from .pipeline import Params, PlateResult, analyse_plate
 from .platemap import load_image_plate_map, load_platemap
-from .results import STANDARD_CONC, export_workbook, needs_check, plate_tables, quality_flags
+from .results import STANDARD_CONC, add_audit_columns, export_workbook, needs_check, plate_tables, quality_flags
 
 BAND_COLORS = [QtGui.QColor(255, 140, 0), QtGui.QColor(40, 190, 70), QtGui.QColor(30, 150, 255)]
 LANE_HEADERS = ["S500", "S125", "S31.25"] + [f"{i}" for i in range(1, 7)]
@@ -31,6 +31,7 @@ class Entry:
     plate: str = ""
     res: PlateResult | None = None
     layout: Layout | None = None          # user-edited layout overrides detection when set
+    auto_layout: Layout | None = None     # the automatic boxes (kept for the audit trail when boxes are edited)
     turns: int | None = None              # rotation actually applied (None until first analysis)
     error: str = ""
     flags: list = field(default_factory=list)
@@ -256,6 +257,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_proc = QtWidgets.QCheckBox("Show processed (inverted + background-corrected)")
         for cb in (self.cb_rects, self.cb_mask, self.cb_proc):
             cb.toggled.connect(self.refresh_view); opts.addWidget(cb)
+        self.cb_blind = QtWidgets.QCheckBox("Blind review (hide numbers)")
+        self.cb_blind.setToolTip("Hide integrals and concentrations while placing boxes, so the values cannot "
+                                 "influence where you draw them")
+        self.cb_blind.toggled.connect(lambda on: self.results_box.setVisible(not on))
+        opts.addWidget(self.cb_blind)
         self.cb_all = QtWidgets.QCheckBox("Edit all lanes of that band together")
         self.cb_all.setToolTip("A move/resize of one box is applied to the same band in every lane "
                                "(e.g. lower the band-1 top edge on a streaky plate in one drag)")
@@ -284,15 +290,17 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Calibration", self.co_cal)
         self.co_cal.currentIndexChanged.connect(self._calibration_changed)
 
-        sl.addWidget(QtWidgets.QLabel("<b>Integrated intensity</b> (rows = bands, top to bottom)"))
+        self.results_box = QtWidgets.QWidget(); rl = QtWidgets.QVBoxLayout(self.results_box)
+        rl.setContentsMargins(0, 0, 0, 0); sl.addWidget(self.results_box)
+        rl.addWidget(QtWidgets.QLabel("<b>Integrated intensity</b> (rows = bands, top to bottom)"))
         self.tbl = QtWidgets.QTableWidget(3, 9); self.tbl.setHorizontalHeaderLabels(LANE_HEADERS)
         self.tbl.setVerticalHeaderLabels(["Band 1", "Band 2", "Band 3"]); self.tbl.setMaximumHeight(130)
-        sl.addWidget(self.tbl)
-        sl.addWidget(QtWidgets.QLabel("<b>Calibrated samples</b> (units of the standards)"))
+        rl.addWidget(self.tbl)
+        rl.addWidget(QtWidgets.QLabel("<b>Calibrated samples</b> (units of the standards)"))
         self.tbl_cal = QtWidgets.QTableWidget(3, 6); self.tbl_cal.setHorizontalHeaderLabels([f"{i}" for i in range(1, 7)])
         self.tbl_cal.setVerticalHeaderLabels(["Band 1", "Band 2", "Band 3"]); self.tbl_cal.setMaximumHeight(130)
-        sl.addWidget(self.tbl_cal)
-        self.lbl_r2 = QtWidgets.QLabel(""); sl.addWidget(self.lbl_r2)
+        rl.addWidget(self.tbl_cal)
+        self.lbl_r2 = QtWidgets.QLabel(""); rl.addWidget(self.lbl_r2)
         sl.addWidget(QtWidgets.QLabel("<b>Flags</b>"))
         self.txt_flags = QtWidgets.QPlainTextEdit(); self.txt_flags.setReadOnly(True); sl.addWidget(self.txt_flags, 1)
         d2 = QtWidgets.QDockWidget("Parameters & results", self); d2.setWidget(side); d2.setFeatures(d2.NoDockWidgetFeatures)
@@ -414,6 +422,8 @@ class MainWindow(QtWidgets.QMainWindow):
             e.error, e.res = err, None
         else:
             e.error, e.res, e.turns = "", res, res.turns
+            if not e.edited:
+                e.auto_layout = res.layout
             self._rebuild_tables(e)
         self._refresh_row(row)
         if row == self.list.currentRow():
@@ -457,7 +467,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def redetect_current(self):
         e = self.cur()
         if e:
-            e.layout, e.edited, e.reviewed, e.res = None, False, False, None
+            e.layout, e.edited, e.reviewed, e.res, e.auto_layout = None, False, False, None, None
             self._run_jobs([(self._row_of(e), str(e.path), None, e.turns)])
 
     def mark_reviewed(self):
@@ -488,7 +498,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if e and e.res is not None:
             idx = self.co_rot.currentIndex()
             e.turns = None if idx == 0 else (idx - 1)
-            e.layout, e.edited, e.res = None, False, None
+            e.layout, e.edited, e.res, e.auto_layout = None, False, None, None
             self._run_jobs([(self._row_of(e), str(e.path), None, e.turns)])
 
     def rect_edited(self, lane, band, x0, x1, y0, y1):
@@ -581,8 +591,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Export anyway?", QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel)
             if r != QtWidgets.QMessageBox.Yes:
                 return
-        items = [dict(image=e.path.name, plate=e.plate or None, res=e.res, df=e.df, cal=e.cal, flags=e.flags, error=e.error)
-                 for e in self.entries if e.res is not None or e.error]
+        items = []
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            for e in self.entries:
+                if e.res is None and not e.error:
+                    continue
+                df = e.df
+                if e.res is not None and e.edited and e.auto_layout is not None:
+                    auto = analyse_plate(e.path, replace(e.res.params, rotate=90 * e.res.turns), e.auto_layout)
+                    auto_df, _ = plate_tables(auto, e.plate or None, self.platemap, model=self.co_cal.currentText())
+                    df = add_audit_columns(e.df, e.res, auto, auto_df)
+                elif e.res is not None and e.edited:      # old session without the automatic boxes: unknown
+                    df = add_audit_columns(e.df, e.res)
+                    df[["integral_auto", "calibrated_auto"]] = np.nan
+                    df["box_edited"] = None
+                items.append(dict(image=e.path.name, plate=e.plate or None, res=e.res, df=df, cal=e.cal,
+                                  flags=e.flags, error=e.error))
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
         try:
             export_workbook(path, items, self.params())
             self.statusBar().showMessage(f"exported {sum(1 for i in items if i.get('res') is not None)} plates to {path}")
@@ -595,6 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         data = dict(params=vars(self.params()), entries=[
             dict(path=str(e.path), plate=e.plate, turns=e.turns, reviewed=e.reviewed, edited=e.edited,
+                 auto_rects=e.auto_layout.rects.tolist() if e.auto_layout is not None else None,
                  rects=(e.layout or (e.res.layout if e.res else None)).rects.tolist() if (e.layout or e.res) else None)
             for e in self.entries])
         Path(path).write_text(json.dumps(data))
@@ -616,6 +644,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not e:
                 continue
             e.plate, e.turns, e.reviewed, e.edited = d["plate"], d["turns"], d["reviewed"], d["edited"]
+            if d.get("auto_rects") is not None:
+                ar = np.array(d["auto_rects"], float); cen = (ar[:, 0, 0] + ar[:, 0, 1]) / 2
+                e.auto_layout = Layout(rects=ar, lane_centers=cen, lane_spacing=float(np.mean(np.diff(cen))))
             if d["rects"] is not None:
                 rects = np.array(d["rects"], float)
                 e.layout = Layout(rects=rects, lane_centers=(rects[:, 0, 0] + rects[:, 0, 1]) / 2,
