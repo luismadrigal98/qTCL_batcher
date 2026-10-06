@@ -8,6 +8,3 @@ dist/
 outputs/
 # Excel lock files
 ~$*
-tests/data/plate3114_payload.json
-tests/data/plate3114_server_result.json
-tests/data/server_reference_columns.json
