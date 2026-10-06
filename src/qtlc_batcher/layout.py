@@ -122,7 +122,7 @@ def _lane_shifts(profs, tmpl, centers, search: int):
     return shifts
 
 
-def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.27) -> Layout:
+def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.17) -> Layout:
     m = magenta_map(rgb)
     centers, spacing = detect_lane_centers(m)
     profs = _row_profiles(m, centers, spacing)
@@ -161,12 +161,18 @@ def detect_rotation(rgb: np.ndarray):
     sc, r, m, centers, d = cands[k]
     f = r.astype(np.float32)
     gray = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
-    brown = ((f[..., 0] - f[..., 2]) > 25) & (gray < 130)
-    x_lo, x_hi = int(centers[0] - d / 2), int(centers[-1] + d / 2)
-    ys, _ = np.nonzero(brown[:, x_lo:x_hi])
-    mag = np.clip(m - np.median(m), 0, None)[:, x_lo:x_hi]
-    rows = mag.sum(axis=1)
-    mag_y = float((rows * np.arange(len(rows))).sum() / max(rows.sum(), 1e-9))
+    hw = int(0.2 * d)
+    lane_cols = np.zeros(r.shape[1], dtype=bool)
+    for c in centers:
+        lane_cols[max(0, int(c) - hw):int(c) + hw] = True
+    # where the pigment is: rows of the summed lane-strip profile that carry real signal
+    pos = np.clip(m - np.median(m), 0, None)[:, lane_cols]
+    rows = ndi.gaussian_filter1d(pos.sum(axis=1), 4)
+    strong = np.nonzero(rows > 0.3 * rows.max())[0]
+    mag_y = float(np.median(strong))
+    # solvent-front spots: brownish (warm) and dark pixels inside the lane strips
+    brown = ((f[..., 0] - f[..., 2]) > 25) & (f[..., 0] > f[..., 1] + 8) & (f[..., 1] > f[..., 2] + 5) & (gray < 130)
+    ys, _ = np.nonzero(brown[:, lane_cols])
     if ys.size > 200:
         flip = float(np.median(ys)) > mag_y
         notes.append("solvent-front spots %s the bands" % ("below" if flip else "above"))

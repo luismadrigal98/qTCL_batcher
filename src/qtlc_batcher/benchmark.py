@@ -49,3 +49,21 @@ def compare(mine: np.ndarray, ref: np.ndarray) -> dict:
         pearson=float(np.corrcoef(a, b)[0, 1]),
         median_ratio=float(np.median(a[strong] / b[strong])) if strong.any() else float("nan"),
     )
+
+
+def calibrated_agreement(mine: list[np.ndarray], ref: list[np.ndarray]) -> dict:
+    """Agreement of per-plate calibrated sample concentrations (scale-free: each plate is calibrated on its own
+    standards, so different rectangle/threshold choices only matter through the bands' relative intensities)."""
+    from scipy.stats import pearsonr, spearmanr
+
+    from .results import calibrate
+
+    h, a = [], []
+    for m, r in zip(mine, ref):
+        cm, cr = calibrate(m).conc, calibrate(r).conc
+        ok = np.isfinite(cm) & np.isfinite(cr)
+        h.append(cr[ok]); a.append(cm[ok])
+    h, a = np.concatenate(h), np.concatenate(a)
+    big = h > 20
+    return dict(pearson=float(pearsonr(h, a)[0]), spearman=float(spearmanr(h, a)[0]), n=int(h.size),
+                median_ratio=float(np.median(a[big] / h[big])) if big.any() else float("nan"))

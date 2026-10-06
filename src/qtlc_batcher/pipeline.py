@@ -13,7 +13,7 @@ from .layout import Layout, detect_layout, detect_rotation
 
 @dataclass
 class Params:
-    min_peak_prom: float = 1.0   # qTLC default
+    min_peak_prom: float = 5.0   # qTLC's own default is 1; 5 best matches the collaborators' tuned values (see README)
     divisor: float = 2.0         # qTLC default
     rotate: int | None = None    # degrees CCW, multiple of 90; None = detect automatically
     bg_kernel: int | None = None  # background kernel size in px; None -> round(diag/2) of the largest-band rectangle
@@ -31,16 +31,15 @@ class PlateResult:
     processed: np.ndarray = field(repr=False, default=None)   # inverted, background-corrected crop
     masks: dict = field(repr=False, default_factory=dict)     # (lane, band) -> bool mask of integrated pixels
     overflow_cols: np.ndarray = field(repr=False, default=None)  # [band, lane] columns hit by the uint8 wrap
+    turns: int = 0                         # 90-degree CCW turns applied to the photo
 
 
 def analyse_plate(path, params: Params | None = None, layout: Layout | None = None) -> PlateResult:
     params = params or Params()
     rgb = imaging.load_rgb(path)
-    if params.rotate is None:
-        turns, _ = detect_rotation(rgb)
+    turns = detect_rotation(rgb)[0] if params.rotate is None else (params.rotate // 90) % 4
+    if turns:
         rgb = np.ascontiguousarray(np.rot90(rgb, turns))
-    elif params.rotate % 360:
-        rgb = np.ascontiguousarray(np.rot90(rgb, (params.rotate // 90) % 4))
     h, w, _ = rgb.shape
     layout = layout or detect_layout(rgb)
     x0, y0, x1, y1 = layout.bounds()
@@ -63,4 +62,4 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
             sub = th[int(ya - y0):int(yb - y0), int(xa - x0):int(xb - x0)]
             values[b, k], masks[(k, b)], overflow[b, k] = integrate_band(
                 sub, params.min_peak_prom, params.divisor, params.uint8_wrap)
-    return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow)
+    return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns)
