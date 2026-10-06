@@ -26,6 +26,7 @@ class Layout:
     lane_centers: np.ndarray
     lane_spacing: float
     notes: list[str] = field(default_factory=list)
+    tilt_deg: float = 0.0          # detected plate tilt (rectangles stay axis-aligned, like the web app)
 
     @property
     def n_lanes(self) -> int:
@@ -108,38 +109,149 @@ def _band_template(profs, n_bands: int = N_BANDS):
     raise ValueError("could not find the standard bands; check orientation / crop of the photo")
 
 
-def _lane_shifts(profs, tmpl, centers, search: int):
-    """Per-lane vertical shift of the band template; weak lanes inherit a linear fit (plate tilt)."""
-    h = profs.shape[1]
-    shifts, strength = np.zeros(len(centers)), np.zeros(len(centers))
-    for k in range(len(centers)):
-        scores = [profs[k, np.clip((tmpl + s).astype(int), 0, h - 1)].sum() for s in range(-search, search + 1)]
-        strength[k], shifts[k] = max(scores), int(np.argmax(scores)) - search
-    ok = strength > 0.35 * np.median(np.sort(strength)[-5:])
-    if ok.sum() >= 3:
-        a, b = np.polyfit(centers[ok], shifts[ok], 1)
-        shifts = np.where(ok, shifts, a * centers + b)
-    return shifts
+def _line_map(gray: np.ndarray, f: int) -> np.ndarray:
+    """Thin dark horizontal structures (pencil origin line, solvent front) on an f-times downsampled image."""
+    h, w = gray.shape[0] // f * f, gray.shape[1] // f * f
+    g = gray[:h, :w].astype(np.float32).reshape(h // f, f, w // f, f).mean(axis=(1, 3))
+    return np.clip(ndi.grey_closing(g, size=(9, 1)) - g, 0, None)
 
 
-def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.17) -> Layout:
-    m = magenta_map(rgb)
+def estimate_tilt(gray: np.ndarray, x_lo: float, x_hi: float, y_lo: float, y_hi: float, x_ref: float,
+                  f: int = 4, max_deg: float = 5.0, step_deg: float = 0.05):
+    """Plate tilt from the straight pencil lines (origin line, solvent front), by projection-profile search.
+
+    Returns (slope dy/dx, profile, y_axis, peakiness): `profile` is the line strength along de-tilted rows
+    y' = y - slope * (x - x_ref), sampled at full-resolution rows `y_axis`; peakiness = max / median of the
+    profile (low when the plate has no usable straight lines, e.g. no origin line was drawn).
+    """
+    H, W = gray.shape
+    x0, x1 = max(0, int(x_lo / f)), min(W // f, int(x_hi / f))
+    y0, y1 = max(0, int(y_lo / f)), min(H // f, int(y_hi / f))
+    L = _line_map(gray, f)[y0:y1, x0:x1]
+    ys, xs = np.mgrid[y0:y1, x0:x1]
+    pad = int(np.tan(np.deg2rad(max_deg)) * (x1 - x0)) + 2
+    best = (-1.0, 0.0, None)
+    for deg in np.arange(-max_deg, max_deg + 1e-9, step_deg):
+        t = np.tan(np.deg2rad(deg))
+        yy = np.round(ys - t * (xs - x_ref / f)).astype(int) - y0 + pad
+        prof = np.bincount(yy.ravel(), weights=L.ravel(), minlength=(y1 - y0) + 2 * pad + 1)
+        score = float((prof ** 2).sum())
+        if score > best[0]:
+            best = (score, t, prof)
+    _, slope, prof = best
+    y_axis = (np.arange(prof.size) - pad + y0) * f + f / 2
+    peakiness = float(prof.max() / max(np.median(prof[prof > 0]) if (prof > 0).any() else 1.0, 1e-9))
+    return slope, prof, y_axis, peakiness
+
+
+def _shift_profile(p: np.ndarray, dy: float) -> np.ndarray:
+    """Profile re-sampled so that q[y] = p[y + dy] (linear interpolation, zero outside)."""
+    y = np.arange(p.size, dtype=float)
+    return np.interp(y + dy, y, p, left=0.0, right=0.0)
+
+
+def _refine_residuals(profs_dt, tmpl, gap, max_res):
+    """Small per-lane vertical corrections (|r| <= max_res, i.e. well under half a band gap, so a band can never
+    be mistaken for its neighbour) by normalised cross-correlation with the standards' de-tilted profile."""
+    ref = profs_dt[:STANDARD_LANES].sum(axis=0)
+    lo, hi = int(max(0, tmpl[0] - gap)), int(min(ref.size, tmpl[-1] + gap))
+    r_ref = ref[lo:hi] - ref[lo:hi].mean()
+    strength = np.array([p[lo:hi].max() for p in profs_dt])
+    res = np.zeros(len(profs_dt))
+    for k, p in enumerate(profs_dt):
+        if strength[k] < 0.08 * strength[:STANDARD_LANES].max():
+            continue                                      # empty lane: keep the tilt prediction
+        best = (-np.inf, 0)
+        for r in range(-int(max_res), int(max_res) + 1):
+            seg = _shift_profile(p, r)[lo:hi]
+            seg = seg - seg.mean()
+            c = float((seg * r_ref).sum() / (np.linalg.norm(seg) * np.linalg.norm(r_ref) + 1e-12))
+            if c > best[0]:
+                best = (c, r)
+        res[k] = best[1]
+    return res
+
+
+def _line_y(line_dt: float, slope: float, x, x_ref: float):
+    return line_dt + slope * (np.asarray(x, dtype=float) - x_ref)
+
+
+def detect_layout(rgb: np.ndarray, half_width_frac: float = 0.17, m: np.ndarray | None = None) -> Layout:
+    """Lanes, plate tilt, bands and rectangles.
+
+    Bands are placed with an explicit tilt model (from the pencil lines) plus a bounded per-lane correction, so a
+    lane whose top band is empty (most samples) cannot slip by one band; rectangles are clipped so they never
+    reach the origin pencil line or the solvent front.
+    """
+    notes: list[str] = []
+    m = magenta_map(rgb) if m is None else m          # `m` may be passed in (already computed by detect_rotation)
     centers, spacing = detect_lane_centers(m)
     profs = _row_profiles(m, centers, spacing)
-    tmpl = _band_template(profs)
-    shifts = _lane_shifts(profs, tmpl, centers, search=max(20, int(0.18 * spacing)))
-    # band limits sit midway between neighbouring bands, so a rectangle never contains two bands
+    tmpl0 = _band_template(profs)                       # rough band rows (standards, not yet de-tilted)
+    gap = float(np.diff(tmpl0).mean())
+    x_ref = float(centers[0])
+
+    gray = imaging_gray(rgb)
+    slope, lprof, ly, peaky = estimate_tilt(gray, centers[0] - spacing / 2, centers[-1] + spacing / 2,
+                                            tmpl0[0] - 4 * gap, tmpl0[-1] + 4 * gap, x_ref)
+    trust_lines = peaky >= 4
+    if not trust_lines:                                 # no clear straight lines: do not trust the tilt
+        slope = 0.0
+        notes.append("no straight pencil line found; plate tilt not estimated")
+    tilt_deg = float(np.rad2deg(np.arctan(slope)))
+    if abs(tilt_deg) >= 1:
+        notes.append(f"plate tilted {tilt_deg:+.1f} degrees (corrected)")
+
+    # de-tilt every lane profile into lane-0 coordinates, rebuild the template from the standards
+    profs_dt = np.array([_shift_profile(p, slope * (c - x_ref)) for p, c in zip(profs, centers)])
+    tmpl = _band_template(profs_dt)
+    gap = float(np.diff(tmpl).min())
+    max_res = 0.25 * gap
+    res = _refine_residuals(profs_dt, tmpl, gap, max_res)
+    if np.any(np.abs(res) >= max_res - 1):
+        bad = [str(k + 1) for k in np.nonzero(np.abs(res) >= max_res - 1)[0]]
+        notes.append(f"lane(s) {', '.join(bad)}: band position at the search limit; check the boxes")
+    shifts = slope * (centers - x_ref) + res
+
+    # band limits midway between neighbouring bands, so a rectangle never contains two bands
     edges = np.concatenate([[tmpl[0] - (tmpl[1] - tmpl[0]) / 2], (tmpl[:-1] + tmpl[1:]) / 2,
                             [tmpl[-1] + (tmpl[-1] - tmpl[-2]) / 2]])
+
+    # origin line = strongest straight line just below the bands; solvent front = strongest just above
+    peaks, _ = find_peaks(lprof, prominence=0.2 * lprof.max()) if lprof.max() > 0 else (np.array([], int), {})
+    py = ly[peaks] if peaks.size else np.array([])
+    margin = 0.08 * gap
+    below = py[(py > tmpl[-1]) & (py < tmpl[-1] + 2 * gap)] if trust_lines else np.array([])
+    above = py[(py < tmpl[0]) & (py > tmpl[0] - 3 * gap)] if trust_lines else np.array([])
+    origin = float(below.min()) if below.size else None
+    front = float(above.max()) if above.size else None
+
     hw = half_width_frac * spacing
     rects = np.zeros((len(centers), len(tmpl), 4))
+    clipped = []
     for k, (c, s) in enumerate(zip(centers, shifts)):
+        xa, xb = c - hw, c + hw
         for b in range(len(tmpl)):
-            rects[k, b] = (c - hw, c + hw, edges[b] + s, edges[b + 1] + s)
-    return Layout(rects=rects, lane_centers=centers, lane_spacing=spacing)
+            y0, y1 = edges[b] + s, edges[b + 1] + s
+            if b == len(tmpl) - 1 and origin is not None:
+                lim = float(_line_y(origin, slope, [xa, xb], x_ref).min()) - margin
+                if y1 > lim:
+                    y1 = max(lim, y0 + 0.3 * gap); clipped.append(k + 1)
+            if b == 0 and front is not None:
+                lim = float(_line_y(front, slope, [xa, xb], x_ref).max()) + margin
+                y0 = min(max(y0, lim), y1 - 0.3 * gap)
+            rects[k, b] = (xa, xb, y0, y1)
+    if clipped:
+        notes.append(f"band-3 boxes shortened above the origin line in lane(s) {', '.join(map(str, clipped))}")
+    return Layout(rects=rects, lane_centers=centers, lane_spacing=spacing, notes=notes, tilt_deg=tilt_deg)
 
 
-def detect_rotation(rgb: np.ndarray):
+def imaging_gray(rgb: np.ndarray) -> np.ndarray:
+    f = rgb.astype(np.float32)
+    return 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+
+
+def detect_rotation(rgb: np.ndarray, return_map: bool = False):
     """Number of 90-degree counter-clockwise turns (0..3) that make the plate upright, plus notes.
 
     Axis: lanes must form a horizontal comb (compare comb contrast on the image and its 90-degree rotation).
@@ -179,4 +291,7 @@ def detect_rotation(rgb: np.ndarray):
     else:
         flip = False
         notes.append("no solvent-front spots found; orientation flip not verified")
-    return (k + (2 if flip else 0)) % 4, notes
+    turns = (k + (2 if flip else 0)) % 4
+    if return_map:                                     # magenta map of the upright photo, reused by detect_layout
+        return turns, notes, np.ascontiguousarray(np.rot90(m, 2) if flip else m)
+    return turns, notes

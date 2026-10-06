@@ -14,10 +14,14 @@ def load_platemap(xlsx_path, sheet: str = "TLC") -> pd.DataFrame:
     f1 = raw.iloc[:, 8:13].copy()
     f1.columns = ["plant", "plate", "sample_no", "meoh_ul", "flower_mg"]
     f1["parent"] = "F1/parent"
-    df = pd.concat([f2, f1[COLUMNS]], ignore_index=True).dropna(subset=["plate", "sample_no"])
+    df = pd.concat([f2, f1[COLUMNS]], ignore_index=True)
+    df["sample_no"] = pd.to_numeric(df["sample_no"], errors="coerce")   # a typo in one cell must not crash
+    df = df.dropna(subset=["plate", "sample_no"])
     df["plate"] = df["plate"].astype(str).str.strip()
     df["sample_no"] = df["sample_no"].astype(int)
     df["plant"] = df["plant"].astype(str)
+    for col in ("meoh_ul", "flower_mg"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 

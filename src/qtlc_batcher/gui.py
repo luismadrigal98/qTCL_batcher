@@ -209,6 +209,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.platemap = None
         self.worker: AnalysisWorker | None = None
         self._rgb_cache: tuple[str, int, np.ndarray] | None = None
+        self._recalc_timer = QtCore.QTimer(self); self._recalc_timer.setSingleShot(True)
+        self._recalc_timer.setInterval(500)               # wait until the user stops typing / clicking
+        self._recalc_timer.timeout.connect(self.recompute_current)
         self._build_ui()
 
     # ---------- UI ----------
@@ -259,12 +262,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_ker = QtWidgets.QSpinBox(); self.sp_ker.setRange(0, 400); self.sp_ker.setSpecialValueText("auto")
         self.cb_wrap = QtWidgets.QCheckBox("Reproduce web-app uint8 overflow (parity)"); self.cb_wrap.setChecked(True)
         self.co_rot = QtWidgets.QComboBox(); self.co_rot.addItems(["Auto", "0°", "90°", "180°", "270°"])
+        self.co_rot.setToolTip("Rotation of the selected plate (detected automatically; override here)")
         form.addRow("MinPeakProm", self.sp_prom); form.addRow("Divisor", self.sp_div)
         form.addRow("Background kernel (px)", self.sp_ker); form.addRow("Rotation (CCW)", self.co_rot)
         sl.addLayout(form); sl.addWidget(self.cb_wrap)
         self.sp_prom.valueChanged.connect(self._params_changed); self.sp_div.valueChanged.connect(self._params_changed)
         self.sp_ker.valueChanged.connect(self._params_changed); self.cb_wrap.toggled.connect(self._params_changed)
         self.co_rot.currentIndexChanged.connect(self._rotation_changed)
+        self.co_cal = QtWidgets.QComboBox(); self.co_cal.addItems(["linear", "loglog"])
+        self.co_cal.setToolTip("Standard-curve model: linear (qTLC paper) or log-log power law")
+        form.addRow("Calibration", self.co_cal)
+        self.co_cal.currentIndexChanged.connect(self._calibration_changed)
 
         sl.addWidget(QtWidgets.QLabel("<b>Integrated intensity</b> (rows = bands, top to bottom)"))
         self.tbl = QtWidgets.QTableWidget(3, 9); self.tbl.setHorizontalHeaderLabels(LANE_HEADERS)
@@ -286,8 +294,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- state helpers ----------
     def params(self) -> Params:
-        rot = [None, 0, 90, 180, 270][self.co_rot.currentIndex()]
-        return Params(min_peak_prom=self.sp_prom.value(), divisor=self.sp_div.value(), rotate=rot,
+        return Params(min_peak_prom=self.sp_prom.value(), divisor=self.sp_div.value(), rotate=None,
                       bg_kernel=self.sp_ker.value() or None, uint8_wrap=self.cb_wrap.isChecked())
 
     def cur(self) -> Entry | None:
@@ -400,16 +407,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if row == self.list.currentRow():
             self.show_current()
 
+    def _calibration_changed(self, *_):
+        for e in self.entries:                       # cheap: no image processing, just re-fit the standards
+            if e.res is not None:
+                self._rebuild_tables(e)
+        self.show_current(keep_view=True)
+
     def _rebuild_tables(self, e: Entry):
-        e.df, e.cal = plate_tables(e.res, e.plate or None, self.platemap)
+        e.df, e.cal = plate_tables(e.res, e.plate or None, self.platemap, model=self.co_cal.currentText())
         e.flags = quality_flags(e.res, e.cal, e.res.turns)
         if e.edited:
             e.flags.append("rectangles were edited manually")
         self._refresh_row(self._row_of(e))
 
+    def _busy(self) -> bool:
+        if self.worker and self.worker.isRunning():
+            self.statusBar().showMessage("batch still running - wait for it to finish, then try again")
+            return True
+        return False
+
     def recompute_current(self):
         e = self.cur()
-        if not e:
+        if not e or self._busy():
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
@@ -436,7 +455,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _params_changed(self, *_):
         if self.cur() and self.cur().res is not None:
-            self.recompute_current()
+            self._recalc_timer.start()
 
     def _rotation_changed(self, *_):
         e = self.cur()
@@ -450,6 +469,11 @@ class MainWindow(QtWidgets.QMainWindow):
         e = self.cur()
         if not e or e.res is None:
             return
+        h, w = self._rgb_for(e).shape[:2]
+        x0, x1 = sorted((min(max(x0, 0), w), min(max(x1, 0), w)))
+        y0, y1 = sorted((min(max(y0, 0), h), min(max(y1, 0), h)))
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            self.show_current(keep_view=True); return       # dragged off the photo: ignore
         rects = e.res.layout.rects.copy(); rects[lane, band] = (x0, x1, y0, y1)
         e.layout = replace(e.res.layout, rects=rects); e.edited = True; e.reviewed = False
         self.recompute_current()
@@ -475,6 +499,9 @@ class MainWindow(QtWidgets.QMainWindow):
         e = self.cur()
         if not e:
             return
+        self.co_rot.blockSignals(True)
+        self.co_rot.setCurrentIndex(0 if e.turns is None else e.turns + 1)
+        self.co_rot.blockSignals(False)
         rgb = self._rgb_for(e)
         t = self.view.transform(); c = self.view.mapToScene(self.view.viewport().rect().center())
         self.view.show_entry(rgb, e.res, self.cb_mask.isChecked(), self.cb_rects.isChecked(), self.cb_proc.isChecked())
@@ -499,7 +526,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 v = e.cal.conc[b, k]
                 it = QtWidgets.QTableWidgetItem("" if not np.isfinite(v) else f"{v:,.1f}")
                 it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter); self.tbl_cal.setItem(b, k, it)
-        self.lbl_r2.setText("standard-curve R²:  " + "   ".join(f"band {b + 1}: {e.cal.r2[b]:.3f}" for b in range(3)
+        self.lbl_r2.setText(f"{e.cal.model} standard-curve R²:  " + "   ".join(f"band {b + 1}: {e.cal.r2[b]:.3f}" for b in range(3)
                                                                if np.isfinite(e.cal.r2[b])) +
                             f"\nkernel {e.res.bg_kernel}px · rotation {90 * e.res.turns}°")
         self.txt_flags.setPlainText("\n".join(e.flags) or "no flags")

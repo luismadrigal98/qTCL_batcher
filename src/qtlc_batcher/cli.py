@@ -37,7 +37,7 @@ def cmd_run(args) -> int:
         plate = img_plate.get(p.name) or img_plate.get(p.stem) or img_plate.get(p.stem.replace("IMG_", ""))
         try:
             res = analyse_plate(p, params)
-            df, cal = plate_tables(res, plate, platemap)
+            df, cal = plate_tables(res, plate, platemap, model=args.calibration)
         except Exception as e:  # one bad photo must not stop a batch
             print(f"FAIL  {p.name}: {e}", file=sys.stderr)
             items.append(dict(image=p.name, plate=plate, error=str(e)))
@@ -87,6 +87,8 @@ def main(argv=None) -> int:
             sp.add_argument("--rotate", type=int, default=None, help="degrees CCW (multiple of 90); default: auto-detect")
             sp.add_argument("--platemap", help="workbook with the `TLC` sheet (plant / MeOH / flower mass per lane)")
             sp.add_argument("--image-plates", help="CSV/Excel with columns image,plate (which plate each photo shows)")
+            sp.add_argument("--calibration", choices=["linear", "loglog"], default="linear",
+                            help="standard-curve model: linear (qTLC paper) or loglog power law (see README)")
         else:
             sp.add_argument("xlsx", help="workbook with the benchmark `Quant` sheet")
             sp.add_argument("photos")

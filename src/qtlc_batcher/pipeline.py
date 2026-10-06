@@ -34,14 +34,30 @@ class PlateResult:
     turns: int = 0                         # 90-degree CCW turns applied to the photo
 
 
+def rect_slice(rect, origin, shape):
+    """Integer row/column slice of `rect` = (x0, x1, y0, y1) inside an array whose (0, 0) is at image `origin`,
+    clamped to the array. (Unclamped, a rectangle dragged past the photo edge gives negative indices, which numpy
+    silently wraps around to the opposite edge.)"""
+    xa, xb, ya, yb = rect
+    ox, oy = origin
+    h, w = shape
+    r0, r1 = min(max(int(ya - oy), 0), h), min(max(int(yb - oy), 0), h)
+    c0, c1 = min(max(int(xa - ox), 0), w), min(max(int(xb - ox), 0), w)
+    return r0, r1, c0, c1
+
+
 def analyse_plate(path, params: Params | None = None, layout: Layout | None = None) -> PlateResult:
     params = params or Params()
     rgb = imaging.load_rgb(path)
-    turns = detect_rotation(rgb)[0] if params.rotate is None else (params.rotate // 90) % 4
+    m = None
+    if params.rotate is None:
+        turns, _, m = detect_rotation(rgb, return_map=True)
+    else:
+        turns = (params.rotate // 90) % 4
     if turns:
         rgb = np.ascontiguousarray(np.rot90(rgb, turns))
     h, w, _ = rgb.shape
-    layout = layout or detect_layout(rgb)
+    layout = layout or detect_layout(rgb, m=m)
     x0, y0, x1, y1 = layout.bounds()
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
     inv = imaging.invert(imaging.to_gray_u8(rgb[y0:y1, x0:x1]))
@@ -58,8 +74,11 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
     masks = {}
     for k in range(n_lanes):
         for b in range(n_bands):
-            xa, xb, ya, yb = layout.rects[k, b]
-            sub = th[int(ya - y0):int(yb - y0), int(xa - x0):int(xb - x0)]
+            r0, r1, c0, c1 = rect_slice(layout.rects[k, b], (x0, y0), th.shape)
+            sub = th[r0:r1, c0:c1]
+            if sub.size == 0:                        # rectangle entirely outside the photo
+                masks[(k, b)] = np.zeros((0, 0), bool)
+                continue
             values[b, k], masks[(k, b)], overflow[b, k] = integrate_band(
                 sub, params.min_peak_prom, params.divisor, params.uint8_wrap)
     return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns)
