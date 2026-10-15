@@ -277,13 +277,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_div = QtWidgets.QDoubleSpinBox(); self.sp_div.setRange(1, 10); self.sp_div.setSingleStep(0.5); self.sp_div.setValue(2.0)
         self.sp_ker = QtWidgets.QSpinBox(); self.sp_ker.setRange(0, 400); self.sp_ker.setSpecialValueText("auto")
         self.cb_wrap = QtWidgets.QCheckBox("Reproduce web-app uint8 overflow bug (parity only)"); self.cb_wrap.setChecked(False)
+        self.cb_streak = QtWidgets.QCheckBox("Remove streaks from band 1 (lanes where a streak is detected)")
+        self.cb_streak.setChecked(True)
         self.co_rot = QtWidgets.QComboBox(); self.co_rot.addItems(["Auto", "0°", "90°", "180°", "270°"])
         self.co_rot.setToolTip("Rotation of the selected plate (detected automatically; override here)")
         form.addRow("MinPeakProm", self.sp_prom); form.addRow("Divisor", self.sp_div)
         form.addRow("Background kernel (px)", self.sp_ker); form.addRow("Rotation (CCW)", self.co_rot)
-        sl.addLayout(form); sl.addWidget(self.cb_wrap)
+        sl.addLayout(form); sl.addWidget(self.cb_wrap); sl.addWidget(self.cb_streak)
         self.sp_prom.valueChanged.connect(self._params_changed); self.sp_div.valueChanged.connect(self._params_changed)
         self.sp_ker.valueChanged.connect(self._params_changed); self.cb_wrap.toggled.connect(self._params_changed)
+        self.cb_streak.toggled.connect(self._params_changed)
         self.co_rot.currentIndexChanged.connect(self._rotation_changed)
         self.co_cal = QtWidgets.QComboBox(); self.co_cal.addItems(["loglog", "linear"])
         self.co_cal.setToolTip("Standard-curve model: linear (qTLC paper) or log-log power law")
@@ -313,7 +316,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- state helpers ----------
     def params(self) -> Params:
         return Params(min_peak_prom=self.sp_prom.value(), divisor=self.sp_div.value(), rotate=None,
-                      bg_kernel=self.sp_ker.value() or None, uint8_wrap=self.cb_wrap.isChecked())
+                      bg_kernel=self.sp_ker.value() or None, uint8_wrap=self.cb_wrap.isChecked(),
+                      streak_correction=self.cb_streak.isChecked())
 
     def cur(self) -> Entry | None:
         r = self.list.currentRow()
@@ -399,9 +403,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def params_mismatch(self) -> list[str]:
         """Names of plates computed with parameters different from the ones currently set in the panel."""
         p = self.params()
-        key = lambda q: (q.min_peak_prom, q.divisor, q.uint8_wrap, q.bg_kernel)
+        key = lambda q: (q.min_peak_prom, q.divisor, q.uint8_wrap, q.streak_correction, q.bg_kernel)
         return [e.path.name for e in self.entries if e.res is not None and
-                (key(e.res.params) != key(p) if p.bg_kernel is not None else key(e.res.params)[:3] != key(p)[:3])]
+                (key(e.res.params) != key(p) if p.bg_kernel is not None else key(e.res.params)[:4] != key(p)[:4])]
 
     def _run_jobs(self, jobs):
         if not jobs or (self.worker and self.worker.isRunning()):

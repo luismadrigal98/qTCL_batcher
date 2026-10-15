@@ -126,3 +126,70 @@ def test_synthetic_plate_empty_band1_slots_are_not_detected(tmp_path):
     assert not samples[samples.band == 1].detected.any()       # samples have no band 1
     assert samples[samples.band.isin([2, 3])].detected.all()    # bands 2 and 3 are there
     assert (res.lod > 0).all() and res.blanks.shape == (3, 8)
+
+
+def _paint_streaks(rgb, x_center, y_top, gap, seed=0):
+    """Thin vertical pink stripes from the solvent-front region down through band 1 (like the real ones)."""
+    rng = np.random.default_rng(seed)
+    img = rgb.astype(np.float32)
+    h, w, _ = img.shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    for _ in range(5):
+        cx = x_center + rng.uniform(-20, 20)
+        decay = np.where(yy >= y_top, np.exp(-(yy - y_top) / (1.5 * gap)), 0.0)
+        img += (rng.uniform(0.4, 0.9) * np.exp(-((xx - cx) ** 2) / (2 * 3.0 ** 2)) * decay)[..., None] * \
+               np.array([-25.0, -95.0, -20.0])
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def test_streak_correction_only_where_detected_and_restores_band1(tmp_path):
+    from PIL import Image
+
+    from qtlc_batcher.pipeline import Params, analyse_plate
+    from qtlc_batcher.results import plate_tables, quality_flags
+
+    rgb, truth, _ = synthetic_plate(0.0)
+    streaky = _paint_streaks(rgb, X0 + 5 * PITCH, BAND_Y - 120, GAP)          # lane 6 = sample 3
+    Image.fromarray(streaky).save(tmp_path / "s.png")
+    Image.fromarray(rgb).save(tmp_path / "c.png")
+    clean = analyse_plate(tmp_path / "c.png", Params(rotate=0))
+    off = analyse_plate(tmp_path / "s.png", Params(rotate=0, streak_correction=False), layout=clean.layout)
+    on = analyse_plate(tmp_path / "s.png", Params(rotate=0), layout=clean.layout)
+    corrected = [k for k in range(9) if np.isfinite(on.band1_raw[k])]
+    assert corrected == [5]                                                    # only the streaked lane
+    assert off.values[0, 5] > 5 * on.lod[0]                                    # the streak fakes a band 1 ...
+    assert on.values[0, 5] < 0.3 * off.values[0, 5]                           # ... the correction removes most of it
+    np.testing.assert_allclose(on.values[1:], off.values[1:])                  # bands 2-3 are never touched
+    df, cal = plate_tables(on, None, None)
+    flags = quality_flags(on, cal)
+    assert any("streak removed" in f for f in flags)
+    row = df[(df.lane_index == 6) & (df.band == 1)].iloc[0]
+    assert row.streak_corrected and row.integral_before_streak_correction == off.values[0, 5]
+
+
+def _add_band1(rgb, x_center, amp=0.6):
+    """A real pelargonidin band in band-1 position of one sample lane."""
+    img = rgb.astype(np.float32)
+    h, w, _ = img.shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    blob = amp * np.exp(-((xx - x_center) ** 2) / (2 * 22 ** 2) - ((yy - BAND_Y) ** 2) / (2 * 9 ** 2))
+    return np.clip(img + blob[..., None] * np.array([-25.0, -95.0, -20.0]), 0, 255).astype(np.uint8)
+
+
+def test_real_pelargonidin_under_a_streak_is_kept_and_flagged(tmp_path):
+    from PIL import Image
+
+    from qtlc_batcher.pipeline import Params, analyse_plate
+    from qtlc_batcher.results import plate_tables, quality_flags
+
+    rgb, _, _ = synthetic_plate(0.0)
+    cx = X0 + 5 * PITCH
+    with_band = _add_band1(rgb, cx)
+    Image.fromarray(with_band).save(tmp_path / "truth.png")
+    Image.fromarray(_paint_streaks(with_band, cx, BAND_Y - 120, GAP)).save(tmp_path / "streak.png")
+    truth = analyse_plate(tmp_path / "truth.png", Params(rotate=0))
+    res = analyse_plate(tmp_path / "streak.png", Params(rotate=0), layout=truth.layout)
+    assert res.streak_call == {5: "present"}
+    assert 0.5 * truth.values[0, 5] < res.values[0, 5] < 1.5 * truth.values[0, 5]
+    df, cal = plate_tables(res, None, None)
+    assert any(f.startswith("CHECK") and "pelargonidin is present" in f for f in quality_flags(res, cal))

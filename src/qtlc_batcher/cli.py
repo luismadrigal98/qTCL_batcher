@@ -17,7 +17,8 @@ PHOTO_PATTERNS = ("*.JPG", "*.jpg", "*.jpeg", "*.JPEG", "*.png", "*.PNG", "*.tif
 
 def _params(args) -> Params:
     return Params(min_peak_prom=args.min_peak_prom, divisor=args.divisor,
-                  rotate=getattr(args, "rotate", None), uint8_wrap=args.web_app_overflow)
+                  rotate=getattr(args, "rotate", None), uint8_wrap=args.web_app_overflow,
+                  streak_correction=not args.no_streak_correction)
 
 
 def _photos(folder) -> list[Path]:
@@ -61,7 +62,7 @@ def cmd_run(args) -> int:
                 print(f"{'CHECK' if n_chk else 'ok':5s} {it['image']}" + (f"  [{n_chk} to check]" if n_chk else ""))
     if not any("res" in it for it in items):
         return 1
-    export_workbook(args.out, items, params)
+    export_workbook(args.out, items, params, combine=not args.no_combine)
     print(f"wrote {args.out}")
     return 0
 
@@ -107,6 +108,8 @@ def main(argv=None) -> int:
         sp.add_argument("--web-app-overflow", action="store_true",
                         help="reproduce the web app's uint8 overflow bug (only to compare with old web-app numbers)")
         sp.add_argument("--no-uint8-wrap", action="store_true", help=argparse.SUPPRESS)   # old flag; now the default
+        sp.add_argument("--no-streak-correction", action="store_true",
+                        help="do not remove vertical streaks from band 1 in flagged lanes")
         sp.add_argument("--calibration", choices=["linear", "loglog"], default="loglog",
                         help="standard-curve model: loglog power law (default) or linear (qTLC paper); see README")
         sp.set_defaults(fn=fn)
@@ -116,6 +119,8 @@ def main(argv=None) -> int:
             sp.add_argument("--rotate", type=int, default=None, help="degrees CCW (multiple of 90); default: auto-detect")
             sp.add_argument("--platemap", help="workbook with the `TLC` sheet (plant / MeOH / flower mass per lane)")
             sp.add_argument("--image-plates", help="CSV/Excel with columns image,plate (which plate each photo shows)")
+            sp.add_argument("--no-combine", action="store_true",
+                            help="do not average repeat photos of the same plate (Plates/Groups sheets)")
             sp.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1),
                             help="photos processed in parallel (default: up to 4 cores; ~0.6 GB RAM each)")
         else:

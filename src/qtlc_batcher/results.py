@@ -101,7 +101,17 @@ def quality_flags(res: PlateResult, cal: Calibration, rotated_turns: int = 0) ->
         where = ", ".join(f"band {b + 1}/lane {k + 1}" for b, k in cells[:4])
         flags.append(f"{CHECK}web-app uint8 overflow hit {n_over} columns ({where}): bands are under-integrated "
                      f"(re-run with uint8_wrap off for the correct value)")
-    if res.top_touch is not None:
+    calls = getattr(res, "streak_call", None) or {}
+    if calls:
+        name = lambda ks: ", ".join(str(k - N_STANDARDS + 1) for k in sorted(ks))
+        present = [k for k, c in calls.items() if c == "present"]
+        absent = [k for k, c in calls.items() if c == "absent"]
+        if present:
+            flags.append(f"{CHECK}streak in band 1 of sample(s) {name(present)}: pelargonidin is present under it; "
+                         f"value corrected for the streak but uncertain - check the box")
+        if absent:
+            flags.append(f"{NOTE}streak removed from band 1 of sample(s) {name(absent)}: no pelargonidin under it")
+    elif res.top_touch is not None and not res.params.streak_correction:
         streaky = [k for k in range(N_STANDARDS, res.values.shape[1])
                    if res.top_touch[0, k] >= 0.15 and res.values[0, k] > 1000]
         if streaky:
@@ -143,6 +153,10 @@ def plate_tables(res: PlateResult, plate: str | None = None, platemap: pd.DataFr
                        calibrated=np.nan if is_std else cal.conc[b, k - N_STANDARDS],
                        calibration=model,
                        lod=float(res.lod[b]) if res.lod is not None else np.nan,
+                       streak_corrected=bool(b == 0 and res.band1_raw is not None and np.isfinite(res.band1_raw[k])),
+                       streak_call=(getattr(res, "streak_call", {}) or {}).get(k, "") if b == 0 else "",
+                       integral_before_streak_correction=(float(res.band1_raw[k]) if b == 0 and res.band1_raw is not None
+                                                          and np.isfinite(res.band1_raw[k]) else res.values[b, k]),
                        detected=bool(res.lod is None or res.values[b, k] >= res.lod[b]),
                        outside_standards=("" if is_std else {1: "above", -1: "below", 0: ""}[
                            int(cal.outside[b, k - N_STANDARDS])]))
@@ -173,9 +187,10 @@ def add_audit_columns(df: pd.DataFrame, res: PlateResult, auto_res: PlateResult 
     return df
 
 
-def export_workbook(path, items: list[dict], params) -> None:
+def export_workbook(path, items: list[dict], params, combine: bool = True) -> None:
     """Write the batch workbook. Each item: dict(res=PlateResult|None, plate=str|None, df=DataFrame|None,
-    cal=Calibration|None, flags=list[str], image=str, error=str|None)."""
+    cal=Calibration|None, flags=list[str], image=str, error=str|None).
+    With `combine`, repeat photos of the same plate are averaged into the Plates sheet (see replicates.py)."""
     tidy, wide, flags = [], [], []
     for it in items:
         if it.get("error"):
@@ -194,8 +209,16 @@ def export_workbook(path, items: list[dict], params) -> None:
             flags.append(dict(image=res.image, plate=it.get("plate"), severity=sev, flag=text))
     if not tidy:
         raise ValueError("nothing to export")
+    plates = groups = None
+    if combine:
+        from .replicates import combine_plates
+        model = str(pd.concat(tidy)["calibration"].iloc[0]) if "calibration" in tidy[0].columns else "loglog"
+        plates, groups = combine_plates([it for it in items if not it.get("error")], model=model)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(path) as xw:
+        if plates is not None and len(plates):
+            plates.to_excel(xw, sheet_name="Plates", index=False)
+            groups.to_excel(xw, sheet_name="Groups", index=False)
         pd.concat(tidy).to_excel(xw, sheet_name="Tidy", index=False)
         pd.DataFrame(wide).to_excel(xw, sheet_name="Integrals", index=False)
         fl = pd.DataFrame(flags or [dict(image="", plate="", severity="", flag="none")])

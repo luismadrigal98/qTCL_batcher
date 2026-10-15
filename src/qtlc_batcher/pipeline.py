@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from . import imaging
@@ -18,6 +19,7 @@ class Params:
     rotate: int | None = None    # degrees CCW, multiple of 90; None = detect automatically
     bg_kernel: int | None = None  # background kernel size in px; None -> round(diag/2) of the largest-band rectangle
     uint8_wrap: bool = False     # True = reproduce the web app's uint8 overflow bug (parity with old numbers)
+    streak_correction: bool = True   # remove vertical streaks from band 1 in lanes where a streak is detected
 
 
 @dataclass
@@ -36,6 +38,8 @@ class PlateResult:
                                                               # integration reaches the box's top edge (streaks)
     blanks: np.ndarray = field(repr=False, default=None)      # [band, gap] integrals of empty boxes between lanes
     lod: np.ndarray = field(repr=False, default=None)         # [band] limit of detection = blank mean + 3 SD
+    band1_raw: np.ndarray = field(repr=False, default=None)   # [lane] band-1 value before streak correction (NaN = none)
+    streak_call: dict = field(repr=False, default_factory=dict)  # lane -> "absent" / "present" after streak removal
 
 
 def rect_slice(rect, origin, shape):
@@ -91,8 +95,90 @@ def analyse_plate(path, params: Params | None = None, layout: Layout | None = No
                 top_touch[b, k] = float((masks[(k, b)][0] & cols).sum() / cols.sum())
     blanks = blank_integrals(th, layout.rects, (x0, y0), params)
     lod = blanks.mean(axis=1) + 3 * blanks.std(axis=1) if blanks.size else np.zeros(n_bands)
+    band1_raw, streak_call = np.full(n_lanes, np.nan), {}
+    if params.streak_correction:
+        present_above = max(0.5 * values[0, 2], lod[0])     # half the lowest standard (or the LOD, if higher)
+        above = np.array([above_box_level(th, layout.rects[k], (x0, y0)) for k in range(n_lanes)])
+        for k in streak_lanes(values, top_touch, above):
+            strict, gentle = baseline_band1(th, layout.rects[k], (x0, y0)), destreak_band1(th, layout.rects[k], (x0, y0))
+            if strict is None or gentle is None:
+                continue
+            band1_raw[k] = values[0, k]
+            v, m, o = integrate_band(strict, params.min_peak_prom, params.divisor, params.uint8_wrap)
+            if v < present_above:                            # strict filter: the streak was all there was
+                streak_call[k] = "absent"
+            else:                                            # pigment under the streak: measure with the gentle filter
+                streak_call[k] = "present"
+                v, m, o = integrate_band(gentle, params.min_peak_prom, params.divisor, params.uint8_wrap)
+            values[0, k], masks[(k, 0)], overflow[0, k] = v, m, o
     return PlateResult(Path(path).name, values, layout, params, (x0, y0, x1, y1), kernel, th, masks, overflow, turns,
-                       top_touch, blanks, lod)
+                       top_touch, blanks, lod, band1_raw, streak_call)
+
+
+STREAK_TOP_TOUCH, STREAK_MIN_VALUE, STREAK_LINE, STREAK_ABOVE_LEVEL = 0.15, 1000.0, 1.6, 4.0
+
+
+def above_box_level(th, lane_rects, origin, frac: float = 0.25) -> float:
+    """Typical processed signal in the strip just above the band-1 box (median over columns of the column medians).
+    Clean plates: median 2, never above 4; lanes with a streak: median 5."""
+    gap = float(np.median(np.diff(lane_rects[:, 2])))
+    b0, _, c0, c1 = rect_slice(lane_rects[0], origin, th.shape)
+    a0 = max(0, b0 - int(round(frac * gap)))
+    if a0 >= b0 or c1 <= c0:
+        return 0.0
+    return float(np.median(np.median(th[a0:b0, c0:c1].astype(float), axis=0)))
+
+
+def streak_lanes(values, top_touch, above=None, n_standards: int = 3):
+    """Sample lanes with a streak running into the band-1 box from the solvent front: either the band-1
+    integration reaches the box's top edge (streak over an empty slot), or the strip just above the box carries more
+    signal than any clean plate shows (streak over a real band, which otherwise inflates it silently)."""
+    out = []
+    for k in range(n_standards, values.shape[1]):
+        if values[0, k] <= STREAK_MIN_VALUE:
+            continue
+        if top_touch[0, k] >= STREAK_TOP_TOUCH or (above is not None and above[k] > STREAK_ABOVE_LEVEL):
+            out.append(k)
+    return out
+
+
+def destreak_band1(th, lane_rects, origin):
+    """Band-1 box of one lane with vertical streaks removed. Streaks are thin vertical stripes running down from the
+    solvent front; bands are wide and short. A 1-px-wide vertical line of 1.6 band spacings fits inside a stripe but
+    not inside a band, so the morphological opening with it is the streak, and subtracting it leaves the band.
+    This *gentle* filter keeps most of a real band (about -13 % without a stripe, -31 % under one) but leaves part of a
+    stripe that starts close above the box, so it is used to MEASURE pelargonidin once `baseline_band1` has shown
+    that some is there. Returns the cleaned band-1 box, or None."""
+    gap = float(np.median(np.diff(lane_rects[:, 2])))
+    xa, xb = lane_rects[0, 0], lane_rects[0, 1]
+    r0, r1, c0, c1 = rect_slice((xa, xb, 0, lane_rects[-1, 3]), origin, th.shape)   # front .. band-3 bottom
+    if r1 <= r0 or c1 <= c0:
+        return None, None
+    strip = np.ascontiguousarray(th[r0:r1, c0:c1]).astype(np.uint8)
+    line = np.ones((max(3, int(round(STREAK_LINE * gap))), 1), np.uint8)
+    clean = strip - cv2.morphologyEx(strip, cv2.MORPH_OPEN, line)          # opening <= strip: no underflow
+    b0, b1, _, _ = rect_slice(lane_rects[0], origin, th.shape)
+    return clean[b0 - r0:b1 - r0]
+
+
+def baseline_band1(th, lane_rects, origin, above: float = 0.25, below: float = 0.12):
+    """*Strict* filter: per-column straight baseline from just above the band-1 box to the valley between band 1 and
+    band 2 (classic densitometric baseline), subtracted. Removes ~99 % of a streak from an empty band-1 slot (stripes
+    painted into synthetic photos) but also ~40-55 % of a real band, so it is used only to DECIDE whether pelargonidin
+    is present under a streak. Returns the cleaned band-1 box, or None."""
+    gap = float(np.median(np.diff(lane_rects[:, 2])))
+    b0, b1, c0, c1 = rect_slice(lane_rects[0], origin, th.shape)
+    a0 = max(0, b0 - int(round(above * gap)))
+    v0, v1 = max(b0, b1 - int(round(below * gap))), min(th.shape[0], b1 + int(round(below * gap)))
+    if b1 <= b0 or c1 <= c0 or a0 >= b0 or v1 <= v0:
+        return None
+    box = th[b0:b1, c0:c1].astype(float)
+    top = np.median(th[a0:b0, c0:c1].astype(float), axis=0)
+    bot = np.median(th[v0:v1, c0:c1].astype(float), axis=0)
+    yt, yb = (a0 + b0) / 2 - b0, (v0 + v1) / 2 - b0
+    y = np.arange(b1 - b0)[:, None]
+    base = top[None, :] + (bot - top)[None, :] * (y - yt) / max(yb - yt, 1.0)
+    return np.clip(np.round(box - np.clip(base, 0, None)), 0, 255)
 
 
 def blank_integrals(th, rects, origin, params) -> np.ndarray:

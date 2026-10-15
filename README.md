@@ -53,7 +53,8 @@ Photos are processed in parallel (`--jobs`, default up to 4 cores, ~0.6 GB RAM e
 missing. A failing photo is reported and skipped; the batch continues.
 Defaults: MinPeakProm 3, Divisor 2, log-log calibration, correct integral, blank-based detection limit (§4, §6).
 Options: `--min-peak-prom` `--divisor` `--rotate 180` (default: automatic) `--calibration linear` (qTLC paper's line)
-`--web-app-overflow` (reproduce the web app's bug, §5) `--jobs 1` (one photo at a time, e.g. on a small laptop).
+`--web-app-overflow` (reproduce the web app's bug, §5) `--jobs 1` (one photo at a time, e.g. on a small laptop)
+`--no-combine` (no Plates sheet, §4) `--no-streak-correction` (leave band-1 streaks in, §4).
 
 ### B. GUI (review and correct)
 
@@ -91,10 +92,33 @@ qtlc-batch benchmark ../Phenotyping/GenotpedPigmentExtractionSamplesList.xlsx ..
 
 | Sheet | Content |
 |---|---|
-| **Tidy** | one row per lane × band: `integral`, `calibrated` (standard units), plant / `meoh_ul` / `flower_mg` (if plate map given), `calibrated_per_mg` = calibrated × MeOH(mL) ÷ flower mass(mg) |
+| **Plates** | **the main result**: one row per plate × sample × band, repeat photos of a plate averaged: `calibrated`, `calibrated_per_mg`, plant / MeOH / flower mass, `n_photos`, `detected_in` (e.g. 2/2), `photo_spread` (disagreement between the photos) |
+| **Groups** | which photos were treated as the same plate and why (same name / matching bands), which were used, which flagged ones were left out |
+| **Tidy** | per photo: one row per lane × band: `integral`, `calibrated` (standard units), plant / `meoh_ul` / `flower_mg` (if plate map given), `calibrated_per_mg` = calibrated × MeOH(mL) ÷ flower mass(mg), `lod` / `detected`, `streak_corrected` / `streak_call` / `integral_before_streak_correction`, and the audit columns of §10 |
 | **Integrals** | same layout as the collaborators' `Quant` sheet (band rows × 9 lanes) |
 | **Flags** | every reason a plate deserves a look (below) |
 | **Parameters** | MinPeakProm, Divisor, rotation, kernel, overflow option used |
+
+**Repeat photos.** Many plates were photographed two to five times. Photos with the same plate name, and consecutive
+photos whose sample lanes match (bands 2–3, r ≥ 0.80; on the current photos repeats correlate at ≥ 0.92 and different
+plates at ≤ 0.53), are treated as one plate; an unnamed photo takes the name of its group. Each photo is calibrated on
+its own standards and the photos are averaged (geometric mean for log-log). If some photos of a plate have a CHECK flag
+and others do not, only the clean ones are used. Why: two photos of the same plate disagree by a median 18 % on a
+sample's concentration; predicting a held-out photo, one other photo misses by 23 %, the average of the remaining
+photos by 16 %. Photos of one plate taken far apart (e.g. AP51: IMG_3138 and IMG_3160–3163) are joined only through
+the plate name. The 66 current photos are 42 plates (20 with repeats). **Photographing every plate twice** makes every
+result more precise.
+
+**Streaks in band 1.** Streaks are thin vertical stripes running from the solvent front down through band 1 (they barely
+reach bands 2–3, which are never corrected). A lane is treated when the band-1 integration runs into the box's top edge
+or the strip just above the box carries more signal than any clean plate shows. Two filters, each used for what it
+does well (validated by painting realistic stripes onto clean lanes with known values):
+- a *strict* per-column straight baseline decides whether pelargonidin is there: it removes ~99 % of a stripe from an
+  empty slot. If what is left is below half the lowest standard, the call is "absent" (a note, nothing to review);
+- otherwise a *gentle* filter (vertical-line opening) measures it: a real band under a stripe then reads −21 to −31 %
+  instead of +42 % uncorrected. These lanes keep a CHECK flag.
+On the current photos 98 sample lanes have a band-1 streak: 55 are resolved as "absent", 43 have pelargonidin under the
+streak and are flagged. Agreement with the collaborators improves slightly with the correction (Pearson 0.887 → 0.897).
 
 **Detection limit.** Each plate gets a limit of detection per band: empty boxes of the same size are integrated in the
 blank plate between neighbouring lanes, and LOD = blank mean + 3 SD (the usual analytical definition). The Tidy sheet has
@@ -115,7 +139,8 @@ collaborators' numbers and in ours. Predicting the middle standard from the oute
 
 | Severity | Flag | Meaning / what to do (see §10) |
 |---|---|---|
-| CHECK | *streak from the solvent front runs into the band-1 box* | the sample smears vertically; band 1 (pelargonidin) may be smear |
+| CHECK | *streak in band 1 of sample(s) …: pelargonidin is present under it* | value corrected for the streak but uncertain: check the box |
+| note | *streak removed from band 1 of sample(s) …: no pelargonidin under it* | resolved automatically |
 | CHECK | *layout: lane(s) … bands far from the other lanes' positions* | that sample lane runs higher/lower than the rest (overloaded sample, streak, uneven front) |
 | CHECK | *standards are not decreasing S500 > S125 > S31.25* | boxes misplaced on the standards, or a bad plate |
 | CHECK | *standard curve slope <= 0* / *R² < 0.90* | the band's calibration is unusable / weak |
@@ -208,15 +233,16 @@ evidence for the defaults.
 
 ## 10. Fixing what remains: the review pass
 
-Everything that software can decide reliably is automatic. What remains needs eyes, because no automatic rule tested so
-far separates smear from pigment without damaging good plates (valley-limited integration and smear-baseline subtraction
-both cut real bands and standards by 15–90 %). On the current 66 photos about 37 have a CHECK flag; most are quick:
+Everything that software can decide reliably is automatic: repeat photos are averaged (a flagged photo is replaced by
+its clean twin), and streaks are removed where the call is clear. On the current photos that leaves **18 of 42 plates**
+where every usable photo still has a CHECK flag; those need eyes:
 
 1. `qtlc-gui ../Phenotyping/TLC_plate_photos` → *Process all* → tick **Only plates to check** → press **N**.
 2. Read the Flags panel, then fix by flag:
-   - **streak into band 1**: tick *Edit all lanes of that band together*, drag the **top edge of a band-1 box** down to
-     where the band (not the smear) starts; all lanes follow. If no band is visible under the smear, the sample has no
-     detectable pelargonidin: shrink the box onto the empty slot.
+   - **pelargonidin present under a streak**: the value is already corrected; look whether the box sits on a real
+     band (to see the raw streak, untick *Remove streaks…* and tick it again afterwards, otherwise the export warns about
+     mixed settings). To tighten it, tick *Edit all lanes of that band together* and drag the **top edge of a band-1
+     box** down to where the band (not the smear) starts.
    - **lane far from the others**: drag that lane's boxes onto its bands (untick *Edit all lanes* first).
    - **standards not decreasing / slope ≤ 0 / R² < 0.90**: look at the three standard lanes; fix misplaced boxes. If the
      standards themselves look wrong (smeared, missing, front too close), the plate cannot be calibrated: re-run it.
@@ -247,6 +273,9 @@ usual remedy; check this against your own protocol.
 ## 11. Limitations / next steps
 
 - Lane count and band count are fixed at 9 × 3 in the automatic detector.
-- Plate name is not read from the photo.
+- Plate name is not read from the photo (groups of repeat photos only need one name; unnamed groups are listed in the
+  Groups sheet).
+- Streak correction is validated on painted stripes and on 3 clean lanes with real pelargonidin; more lanes with known
+  pelargonidin under a streak would sharpen the "present" values.
 - Calibration assumes the 4-fold standard series 500 / 125 / 31.25 (units of the standards) and a linear fit per band.
 - Layouts that fail detection are flagged, not silently accepted.
