@@ -30,10 +30,22 @@ Without the GUI libraries use `pip install -e .`. Works on Linux, macOS and Wind
 
 The plate name (AP31 …) is handwritten on the plate and is **not** read from the photo. Provide it either way:
 
-- a CSV with two columns, `image,plate` — see `examples/image_plates_benchmark.csv` (the 28 benchmark photos), or
-- type it into the **Plate** column of the GUI.
+- a table with two columns, `image,plate` — see `examples/image_plates_benchmark.csv` (the 28 benchmark photos), or
+- type it into the **Plate** column of the GUI (one name per group of repeat photos is enough).
 
-With a plate name and the workbook's `TLC` sheet (`--platemap`), the output also carries plant, MeOH volume and flower mass.
+**Plate map** (`--platemap`, GUI *Plate map…*): with a plate name, the output also carries plant, MeOH volume and flower
+mass. Use a CSV/TSV/TXT or Excel file with these columns (only `plate` and `sample_no` are required; extra columns and
+title rows are ignored) — see `examples/platemap_template.csv`:
+
+```
+plate,sample_no,plant,parent,meoh_ul,flower_mg
+AP31,1,395-2,K3A1,50,20.9
+```
+
+Columns are recognised by name, so the collaborators' headers work as they are ("Plate", "Sample # on Plate", "MeOH
+added (uL)", "Flower Mass (mg)", …), and so does the workbook itself or its `TLC` sheet saved as CSV (both side-by-side
+blocks are read). Comma, semicolon or tab separators and decimal commas are all fine. Both tables accept the same
+formats.
 
 ## 3. Run it
 

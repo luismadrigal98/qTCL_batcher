@@ -117,7 +117,8 @@ def main(argv=None) -> int:
             sp.add_argument("photos", help="folder with plate photos")
             sp.add_argument("--out", default="qtlc_results.xlsx")
             sp.add_argument("--rotate", type=int, default=None, help="degrees CCW (multiple of 90); default: auto-detect")
-            sp.add_argument("--platemap", help="workbook with the `TLC` sheet (plant / MeOH / flower mass per lane)")
+            sp.add_argument("--platemap", help="CSV or Excel plate map: plate, sample_no, plant, parent, meoh_ul, "
+                                               "flower_mg (the workbook's TLC sheet works as is)")
             sp.add_argument("--image-plates", help="CSV/Excel with columns image,plate (which plate each photo shows)")
             sp.add_argument("--no-combine", action="store_true",
                             help="do not average repeat photos of the same plate (Plates/Groups sheets)")

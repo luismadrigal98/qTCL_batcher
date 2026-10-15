@@ -221,7 +221,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def act(text, slot, tip=""):
             a = QtWidgets.QAction(text, self); a.triggered.connect(slot); a.setToolTip(tip); tb.addAction(a); return a
         act("Open folder…", self.open_folder, "Load a folder of plate photos")
-        act("Plate map…", self.load_platemap_dialog, "Workbook with the TLC sheet (plant, MeOH, flower mass)")
+        act("Plate map…", self.load_platemap_dialog, "CSV or Excel: plate, sample_no, plant, meoh_ul, flower_mg")
         act("Image→plate…", self.load_image_plates, "CSV/Excel with columns image,plate")
         tb.addSeparator()
         act("Process all", self.process_all, "Detect and integrate every pending plate")
@@ -361,24 +361,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"{len(self.entries)} photos in {folder}")
 
     def load_platemap_dialog(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Workbook with the TLC sheet", "", "Excel (*.xlsx)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Plate map: CSV or Excel with plate, sample_no, plant, meoh_ul, flower_mg", "", "Tables (*.csv *.tsv *.txt *.xlsx *.xlsm);;All files (*)")
         if f:
             self.set_platemap(f)
 
     def set_platemap(self, path):
-        self.platemap = load_platemap(path)
+        try:
+            self.platemap = load_platemap(path)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Plate map not loaded", str(ex)); return
         self.statusBar().showMessage(f"plate map: {len(self.platemap)} lanes, {self.platemap.plate.nunique()} plates")
         for e in self.entries:
             if e.res is not None:
                 self._rebuild_tables(e)
 
     def load_image_plates(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "CSV/Excel with columns image,plate", "", "Tables (*.csv *.xlsx)")
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Photo -> plate list: CSV or Excel with columns image, plate",
+                                                     "", "Tables (*.csv *.tsv *.txt *.xlsx *.xlsm);;All files (*)")
         if f:
             self.set_image_plates(f)
 
     def set_image_plates(self, path):
-        m = load_image_plate_map(path)
+        try:
+            m = load_image_plate_map(path)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Photo -> plate list not loaded", str(ex)); return
         for r, e in enumerate(self.entries):
             e.plate = m.get(e.path.name) or m.get(e.path.stem) or m.get(e.path.stem.replace("IMG_", "")) or e.plate
             self._refresh_row(r)
