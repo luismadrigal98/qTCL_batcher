@@ -291,3 +291,24 @@ usual remedy; check this against your own protocol.
   pelargonidin under a streak would sharpen the "present" values.
 - Calibration assumes the 4-fold standard series 500 / 125 / 31.25 (units of the standards) and a linear fit per band.
 - Layouts that fail detection are flagged, not silently accepted.
+
+## Citation
+
+If you use this software, please cite in your work the following:
+
+@article{macfhionnlaoichToolkitQuantifyTarget2018,
+  title = {A {{Toolkit}} to {{Quantify Target Compounds}} in {{Thin-Layer-ChromatographyExperiments}}},
+  author = {Mac Fhionnlaoich, Niamh and Ibsen, Stuart and Serrano, Luis A. and Taylor, Alaric and Qi, Runzhang and Guldin, Stefan},
+  year = 2018,
+  month = dec,
+  journal = {Journal of Chemical Education},
+  volume = {95},
+  number = {12},
+  pages = {2191--2196},
+  issn = {0021-9584, 1938-1328},
+  doi = {10.1021/acs.jchemed.8b00144},
+  urldate = {2026-10-20},
+  abstract = {Abstract             Thin-layer chromatography (TLC) is one of the basic analytical procedures in chemistry and allows the demonstration of various chemical principles in an educational setting. An often-overlooked aspect of TLC is the capability to quantify isolated target compounds in an unknown sample. Here, we present a suitable route to implement quantitative analysis in a lesson plan. We~provide both a stand-alone software and an online webapp that allow students to obtain quantitative information from a developed TLC plate and present two suitable experiments, namely, the absorbance-based quantification of the colorant Sudan IV and the fluorescence-based quantification of rhodamine 6G, a fluorophore widely used in biotechnology. Students conduct TLC experiments following established protocols,~take pictures of their TLC plates with mobile phones, and subsequently quantify the~different compounds in the separate bands they observe.},
+  copyright = {https://pubs.acs.org/page/policy/authorchoice\_ccby\_termsofuse.html},
+  langid = {english}
+}
