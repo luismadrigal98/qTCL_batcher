@@ -314,6 +314,9 @@ def detect_rotation(rgb: np.ndarray, return_map: bool = False):
     # where the pigment is: rows of the summed lane-strip profile that carry real signal
     pos = np.clip(m - np.median(m), 0, None)[:, lane_cols]
     rows = ndi.gaussian_filter1d(pos.sum(axis=1), 4)
+    # keep only narrow peaks (the bands): a running median over 3 lane pitches follows broad tints such as the
+    # purplish bench around the plate, which otherwise outweighs faint sample lanes (AP162/AP163 were flipped)
+    rows = rows - ndi.median_filter(rows, size=int(3 * d) | 1)
     strong = np.nonzero(rows > 0.3 * rows.max())[0]
     mag_y = float(np.median(strong))
     # solvent-front spots: brownish (warm) and dark pixels inside the lane strips

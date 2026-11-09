@@ -193,3 +193,44 @@ def test_real_pelargonidin_under_a_streak_is_kept_and_flagged(tmp_path):
     assert 0.5 * truth.values[0, 5] < res.values[0, 5] < 1.5 * truth.values[0, 5]
     df, cal = plate_tables(res, None, None)
     assert any(f.startswith("CHECK") and "pelargonidin is present" in f for f in quality_flags(res, cal))
+
+
+def faint_plate_on_tinted_bench(seed: int = 0):
+    """Upright plate like AP162/AP163 (colours measured on those photos): standards visible, samples faint, brown
+    solvent-front spots above the bands, and a bench around the plate that is slightly more purple than the plate.
+    Summed over the lanes, that tint outweighed the faint bands and the plate was turned upside down."""
+    rng = np.random.default_rng(seed)
+    h, w, pitch, x0, band_y, gap = 1333, 2000, 173, 316, 800, 65
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    img = np.empty((h, w, 3), np.float32)
+    img[...] = (155, 163, 163)                                     # bench: (R+B)/2 - G = -4.0 ...
+    img[:330] = (150, 157, 160)                                    # ... and -2.0 above the plate (lit unevenly)
+    img[330:1180, 100:1900] = (156, 165, 164)                      # plate: -5.0
+    pink = np.array([-11.0, -50.0, -24.0])                         # S500 band centre minus plate (+33)
+    amps = [[1.0, 0.9, 1.0], [0.35, 0.3, 0.35], [0.1, 0.08, 0.1],  # S500, S125, S31.25
+            [0, 0, 0.12], [0, 0, 0.03], [0, 0, 0.35], [0, 0, 0], [0.08, 0, 0], [0, 0.05, 0.3]]
+    for k in range(9):
+        cx = x0 + k * pitch
+        for i, a in enumerate(amps[k]):
+            if a:
+                img += (a * np.exp(-((xx - cx) ** 2) / (2 * 20 ** 2) - ((yy - band_y - i * gap) ** 2) /
+                                   (2 * 20 ** 2)))[..., None] * pink
+        if k >= 3:                                                 # brown spots on the solvent front
+            for dx in (-10, 10):
+                img[((xx - cx - dx) ** 2 / 8 ** 2 + (yy - 700) ** 2 / 10 ** 2) < 1] = (120, 85, 40)
+    img[np.abs(yy - 1000) < 2] = (95, 95, 100)                     # origin pencil line
+    img += rng.normal(0, 1.5, img.shape)
+    return np.clip(img, 0, 255).astype(np.uint8), [band_y + i * gap for i in range(3)], x0
+
+
+def test_faint_plate_on_tinted_bench_is_not_flipped():
+    from qtlc_batcher.layout import detect_rotation
+
+    rgb, band_rows, x0 = faint_plate_on_tinted_bench()
+    assert detect_rotation(rgb)[0] == 0
+    assert detect_rotation(np.ascontiguousarray(rgb[::-1, ::-1]))[0] == 2      # the same plate upside down
+    lay = detect_layout(rgb)
+    assert abs(lay.lane_centers[0] - x0) < 10
+    for b, y in enumerate(band_rows):                              # S500 boxes sit on the S500 bands
+        _, _, y0, y1 = lay.rects[0, b]
+        assert y0 < y < y1

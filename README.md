@@ -18,7 +18,7 @@ where virtual-environment symlinks can fail.
 python3 -m venv ~/venvs/qtlc
 source ~/venvs/qtlc/bin/activate
 pip install --upgrade pip
-cd "/mnt/1692B2EF92B2D28B/GRA/Anthocyanin_project/TCL Imaging/qTCL_batcher"
+cd "Path to the repository code (where you cloned it)"
 pip install -e ".[gui,dev]"
 pytest -q                      # 21 tests should pass
 ```
@@ -240,6 +240,7 @@ evidence for the defaults.
 | Streaks: band 1 shows signal in samples that look pelargonidin-free | the *streak* flag; see §10 |
 | GUI does not start (Linux, "could not load the Qt platform plugin xcb") | install the missing xcb library named in the message, usually `sudo apt install libxcb-xinerama0`; on a headless server use `QT_QPA_PLATFORM=offscreen` |
 | `could not determine plate orientation / no lane comb` | photo has no usable lanes; process it in the GUI with *Rotation* set by hand, or crop the photo |
+| Plate turned upside down although the photo is upright: boxes far too tall, the photo takes ~20× longer, *photo was rotated 180 degrees* note | fixed for faint plates on a purplish bench (AP162/AP163); if it recurs, set *Rotation* to 0 for that plate in the GUI (`--rotate` applies to every photo of a run) |
 | Plate flagged "standards are not decreasing" | boxes are misplaced (or the plate is mislabelled): fix in the GUI |
 | Numbers differ from the web page | check parameters (MinPeakProm 3 here, 1 there), the calibration model, and the overflow option |
 
